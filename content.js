@@ -11,6 +11,42 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+function deepQuerySelectorAll(selector, roots = [document]) {
+  const results = new Set();
+  const queue = [...roots];
+  const visited = new Set();
+
+  while (queue.length) {
+    const root = queue.shift();
+    if (!root || visited.has(root)) continue;
+    visited.add(root);
+
+    if (typeof root.querySelectorAll === 'function') {
+      let matches = [];
+      try { matches = root.querySelectorAll(selector); } catch { matches = []; }
+      matches.forEach(el => results.add(el));
+      let frames = [];
+      try { frames = root.querySelectorAll('iframe'); } catch { frames = []; }
+      frames.forEach(frame => {
+        try {
+          const doc = frame.contentDocument || frame.contentWindow?.document;
+          if (doc) queue.push(doc);
+        } catch {
+          // Ignore cross-origin frames.
+        }
+      });
+
+      let elements = [];
+      try { elements = root.querySelectorAll('*'); } catch { elements = []; }
+      elements.forEach(el => {
+        if (el.shadowRoot) queue.push(el.shadowRoot);
+      });
+    }
+  }
+
+  return Array.from(results);
+}
+
 const storage = {
   get: (k, d = null) => new Promise(r => chrome.storage.sync.get([k], v => r(v[k] ?? d))),
   set: (k, v) => new Promise(r => chrome.storage.sync.set({ [k]: v }, r)),
@@ -87,6 +123,215 @@ async function openAIChat(apiKey, systemPrompt, userPrompt, temperature = 0.8) {
   }
   const data = await resp.json();
   return data.choices?.[0]?.message?.content ?? '';
+}
+
+const PR_FEEDBACK_SYSTEM_PROMPT = `
+Act as a **senior PR editor and email deliverability coach**.
+You receive raw HTML of a press-release mailing.
+
+Your job: deliver clear, concise editorial feedback that helps the sender make their mailing more professional, engaging, and correct.
+
+### Review checklist
+1. Strip all HTML and read only the text.
+2. Detect the dominant language (Dutch or English) and respond **entirely in that language**, including all headings.
+3. Evaluate:
+   - Clarity and structure
+   - Tone and storytelling
+   - Grammar, spelling, and punctuation (list specific typos if any)
+   - Readability and sentence flow
+   - Call-to-action clarity **(ignore standard unsubscribe links added automatically by email software)**
+
+### Write your response in plain text with the following three sections, using headings in the same language as the text:
+**Sterktes** (if Dutch) / **Strengths** (if English)  
+Summarize 3–5 clear positives (e.g. human quotes, news angle, tone, flow).
+
+**Verbeterpunten** (if Dutch) / **Areas for improvement** (if English)  
+Point out concrete issues — including grammar or spelling errors — and explain briefly why they matter.
+
+**Aanpak** (if Dutch) / **Action plan** (if English)  
+List practical next steps or short rewrite examples showing how to fix the problems. Use bullet points or short paragraphs, not code blocks or Markdown symbols.
+
+### Style guidelines
+- Be professional, pragmatic, and concise.
+- Avoid Markdown syntax like #, ####, or triple backticks.
+- Never restate the whole text; focus only on insights.
+- Do not include raw HTML.
+`;
+
+
+
+
+const BRIDGE_SCRIPT_ID = 'spr-pr-feedback-bridge';
+const BRIDGE_REQUEST = 'SPR_FEEDBACK_GET_HTML';
+const BRIDGE_RESPONSE = 'SPR_FEEDBACK_HTML';
+const BRIDGE_READY = 'SPR_FEEDBACK_BRIDGE_READY';
+const BRIDGE_PING = 'SPR_FEEDBACK_BRIDGE_PING';
+
+let bridgeReady = false;
+let bridgeReadyWaiters = [];
+const bridgeHtmlRequests = new Map();
+let lastFeedbackInput = '';
+let inputModal = null;
+
+function logFeedback(...args) {
+  try {
+    console.debug('[Smartpr Labs][Feedback]', ...args);
+  } catch {
+    // ignore logging errors
+  }
+}
+
+function markdownToHtml(md) {
+  if (!md) return '';
+  const escaped = escapeHTML(md);
+  const withLists = escaped.replace(/(^|\n)(- .+(?:\n- .+)*)/g, (match, prefix, listBlock) => {
+    const items = listBlock.trim().split('\n')
+      .map(line => line.replace(/^- /, '').trim())
+      .filter(Boolean)
+      .map(item => `<li>${item}</li>`)
+      .join('');
+    return `${prefix}<ul>${items}</ul>`;
+  });
+
+  let html = withLists
+    .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+  html = html.replace(/(?:\r?\n){2,}/g, '</p><p>');
+  html = html.replace(/(?:\r?\n)/g, '<br>');
+  html = `<p>${html}</p>`;
+  html = html.replace(/<p>(\s*<ul>)/g, '$1').replace(/(<\/ul>)\s*<\/p>/g, '$1');
+  html = html.replace(/<p>(\s*<h[1-6]>)/g, '$1').replace(/(<\/h[1-6]>)\s*<\/p>/g, '$1');
+  return html;
+}
+
+function ensureFeedbackInputModal() {
+  if (inputModal && document.body.contains(inputModal)) return inputModal;
+  const modal = document.createElement('div');
+  modal.id = 'spr-feedback-input-modal';
+  modal.innerHTML = `
+    <div class="spr-feedback-input-card">
+      <div class="spr-feedback-input-header">
+        <strong>Input sent to ChatGPT</strong>
+        <button type="button" class="spr-feedback-action" data-feedback-input-close title="Close">✕</button>
+      </div>
+      <textarea readonly class="spr-feedback-input-text"></textarea>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  const closeBtn = modal.querySelector('[data-feedback-input-close]');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      modal.style.display = 'none';
+    });
+  }
+  inputModal = modal;
+  return modal;
+}
+
+function showFeedbackInputModal() {
+  if (!lastFeedbackInput) {
+    toast('No input captured yet.');
+    return;
+  }
+  const modal = ensureFeedbackInputModal();
+  const textarea = modal.querySelector('.spr-feedback-input-text');
+  if (textarea) {
+    textarea.value = lastFeedbackInput;
+    textarea.scrollTop = 0;
+  }
+  modal.style.display = 'flex';
+}
+
+function handleBridgeMessage(event) {
+  if (event.source !== window || !event.data || typeof event.data !== 'object') return;
+  const { type, html, id } = event.data;
+  if (type === BRIDGE_READY) {
+    bridgeReady = true;
+    const waiters = bridgeReadyWaiters.slice();
+    bridgeReadyWaiters = [];
+    waiters.forEach(fn => { try { fn(); } catch { /* ignore */ } });
+    logFeedback('Bridge reported ready');
+  } else if (type === BRIDGE_RESPONSE && id) {
+    const pending = bridgeHtmlRequests.get(id);
+    if (!pending) return;
+    bridgeHtmlRequests.delete(id);
+    clearTimeout(pending.timeout);
+    pending.resolve(typeof html === 'string' ? html.trim() : '');
+    logFeedback('Received HTML from bridge', { id, length: html ? html.length : 0 });
+  }
+}
+
+if (!window.__sprFeedbackBridgeListenerAttached) {
+  window.addEventListener('message', handleBridgeMessage, false);
+  window.__sprFeedbackBridgeListenerAttached = true;
+}
+
+function injectBeeBridge() {
+  if (document.getElementById(BRIDGE_SCRIPT_ID)) return;
+  const script = document.createElement('script');
+  script.id = BRIDGE_SCRIPT_ID;
+  script.src = chrome.runtime.getURL('page-bridge.js');
+  script.async = false;
+  script.onload = () => {
+    setTimeout(() => {
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }, 0);
+  };
+  (document.head || document.documentElement).appendChild(script);
+  logFeedback('Injected page bridge');
+}
+
+function waitForBridgeReady(timeout = 6000) {
+  if (bridgeReady) return Promise.resolve(true);
+  injectBeeBridge();
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      bridgeReadyWaiters = bridgeReadyWaiters.filter(fn => fn !== onReady);
+      logFeedback('Bridge ready wait timed out after', timeout, 'ms');
+      resolve(false);
+    }, timeout);
+    const onReady = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      bridgeReadyWaiters = bridgeReadyWaiters.filter(fn => fn !== onReady);
+      logFeedback('Bridge ready wait resolved');
+      resolve(true);
+    };
+    bridgeReadyWaiters.push(onReady);
+    try { window.postMessage({ type: BRIDGE_PING }, '*'); } catch { /* ignore */ }
+  });
+}
+
+async function requestBeeHtmlViaBridge(timeout = 6000) {
+  injectBeeBridge();
+  await waitForBridgeReady(6000);
+
+  const id = `spr-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      bridgeHtmlRequests.delete(id);
+      logFeedback('Bridge request timed out', { id, timeout });
+      resolve('');
+    }, timeout);
+    bridgeHtmlRequests.set(id, { resolve, timeout: timer });
+    try {
+      window.postMessage({ type: BRIDGE_REQUEST, id }, '*');
+      logFeedback('Requested HTML from bridge', { id });
+    } catch {
+      clearTimeout(timer);
+      bridgeHtmlRequests.delete(id);
+      logFeedback('Failed to post request to bridge', { id });
+      resolve('');
+    }
+  });
 }
 
 // ---------- Modal UI ----------
@@ -376,9 +621,229 @@ function ensureInjected() {
   }, 800);
 }
 
+// ---------- PR Feedback Assistant ----------
+function ensurePRFeedbackPanel() {
+  if (!document.body) return null;
+  let panel = $('#spr-feedback-panel');
+  if (panel) return panel;
+
+  panel = document.createElement('div');
+  panel.id = 'spr-feedback-panel';
+  panel.innerHTML = `
+    <div class="spr-feedback-header">
+      <strong>PR Feedback</strong>
+      <button type="button" class="spr-feedback-action" data-feedback-view-input style="display:none">View input</button>
+      <button type="button" class="spr-feedback-action" data-feedback-copy style="display:none">Copy</button>
+      <button type="button" class="spr-feedback-close" data-feedback-close title="Close">✕</button>
+    </div>
+    <div id="spr-feedback-status" class="spr-feedback-status"></div>
+    <div id="spr-feedback-content" class="spr-feedback-content"></div>
+  `;
+  document.body.appendChild(panel);
+
+  const closeBtn = panel.querySelector('[data-feedback-close]');
+  if (closeBtn) closeBtn.addEventListener('click', hideFeedbackPanel);
+
+  const copyBtn = panel.querySelector('[data-feedback-copy]');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const contentEl = panel.querySelector('#spr-feedback-content');
+      const content = contentEl?.dataset?.raw ?? contentEl?.textContent ?? '';
+      if (!content.trim()) {
+        toast('Nothing to copy yet.');
+        return;
+      }
+      await copyToClipboard(content);
+      toast('Feedback copied.');
+    });
+  }
+
+  const viewInputBtn = panel.querySelector('[data-feedback-view-input]');
+  if (viewInputBtn) {
+    viewInputBtn.addEventListener('click', () => showFeedbackInputModal());
+  }
+
+  return panel;
+}
+
+function showFeedbackPanel() {
+  const panel = ensurePRFeedbackPanel();
+  if (!panel) return null;
+  panel.style.display = 'flex';
+  return panel;
+}
+
+function hideFeedbackPanel() {
+  const panel = $('#spr-feedback-panel');
+  if (panel) panel.style.display = 'none';
+}
+
+function setFeedbackPanelState(state, message = '') {
+  const panel = ensurePRFeedbackPanel();
+  if (!panel) return;
+  const statusEl = panel.querySelector('#spr-feedback-status');
+  const contentEl = panel.querySelector('#spr-feedback-content');
+  const copyBtn = panel.querySelector('[data-feedback-copy]');
+  const viewInputBtn = panel.querySelector('[data-feedback-view-input]');
+  if (!statusEl || !contentEl || !copyBtn) return;
+
+  statusEl.classList.remove('is-error');
+  if (state === 'loading') {
+    statusEl.textContent = message || 'Loading…';
+    statusEl.style.display = '';
+    contentEl.textContent = '';
+    contentEl.dataset.raw = '';
+   copyBtn.style.display = 'none';
+   if (viewInputBtn) viewInputBtn.style.display = lastFeedbackInput ? '' : 'none';
+ } else if (state === 'error') {
+    statusEl.textContent = message || 'Something went wrong.';
+    statusEl.style.display = '';
+    statusEl.classList.add('is-error');
+    contentEl.textContent = '';
+    contentEl.dataset.raw = '';
+   copyBtn.style.display = 'none';
+   if (viewInputBtn) viewInputBtn.style.display = lastFeedbackInput ? '' : 'none';
+ } else if (state === 'success') {
+    statusEl.textContent = '';
+    statusEl.style.display = 'none';
+    contentEl.dataset.raw = message;
+    contentEl.innerHTML = markdownToHtml(message);
+   copyBtn.style.display = '';
+   if (viewInputBtn) viewInputBtn.style.display = lastFeedbackInput ? '' : 'none';
+ }
+}
+
+async function requestPRFeedback() {
+  showFeedbackPanel();
+  setFeedbackPanelState('loading', 'Collecting mailing content…');
+  logFeedback('Feedback request started');
+
+  const mailingHTML = await collectMailingHTML();
+  if (!mailingHTML) {
+    setFeedbackPanelState('error', 'Could not find the mailing content on this page.');
+    logFeedback('No mailing HTML available');
+    return;
+  }
+  logFeedback('Mailing HTML collected', { length: mailingHTML.length });
+  lastFeedbackInput = mailingHTML;
+  const viewBtn = $('#spr-feedback-panel [data-feedback-view-input]');
+  if (viewBtn) viewBtn.style.display = lastFeedbackInput ? '' : 'none';
+
+  let apiKey;
+  try {
+    apiKey = await getApiKey();
+  } catch {
+    setFeedbackPanelState('error', 'Add your OpenAI API key via the extension options to request feedback.');
+    logFeedback('API key missing');
+    return;
+  }
+
+  const userPrompt = `Here is the HTML of the mailing currently being edited in Smart.pr:\n\n${mailingHTML}`;
+
+  try {
+    setFeedbackPanelState('loading', 'Requesting PR feedback…');
+    logFeedback('Calling OpenAI for feedback');
+    const feedback = await openAIChat(apiKey, PR_FEEDBACK_SYSTEM_PROMPT, userPrompt, 0.4);
+    setFeedbackPanelState('success', feedback.trim());
+    logFeedback('Received feedback from OpenAI', { length: feedback ? feedback.length : 0 });
+  } catch (err) {
+    console.error('[SASE] PR feedback error', err);
+    setFeedbackPanelState('error', 'Could not fetch PR feedback. Please try again.');
+    logFeedback('OpenAI request failed', err?.message || err);
+  }
+}
+
+async function collectMailingHTML() {
+  const PRIMARY_SELECTOR = '.publisher-mailing-html__root';
+  const secondarySelectors = [
+    '.publisher-mailings-design-bee__body',
+    '[mailing-id-selector="publisherMailingIdSelector"]',
+    '.mailing-html__iframe',
+    'publisher-mailing-html',
+    'div.stageContent',
+    'div.Stage_stageInner__M9-ST',
+    'div.Stage_stageInner',
+    'div.stageInner',
+    '.stageInner',
+    '.Stage_stageInner__M9-ST'
+  ];
+
+  const beeHtml = await requestBeeHtmlViaBridge();
+  if (beeHtml) {
+    logFeedback('Using HTML from bridge', { length: beeHtml.length });
+    return beeHtml;
+  }
+  logFeedback('Bridge did not return HTML, falling back to DOM scraping');
+
+  const primaryNodes = deepQuerySelectorAll(PRIMARY_SELECTOR).filter(Boolean);
+  if (primaryNodes.length) {
+    const htmlChunks = primaryNodes
+      .map(node => (node.outerHTML || '').trim())
+      .filter(Boolean);
+    if (htmlChunks.length) {
+      logFeedback('Collected HTML via primary selectors', { nodes: htmlChunks.length });
+      return htmlChunks.join('\n\n');
+    }
+  }
+
+  for (const selector of secondarySelectors) {
+    const candidates = deepQuerySelectorAll(selector).filter(Boolean);
+    if (candidates.length) {
+      const htmlChunks = candidates
+        .map(node => (node.outerHTML || '').trim())
+        .filter(Boolean);
+      if (htmlChunks.length) {
+        logFeedback('Collected HTML via secondary selector', { selector, nodes: htmlChunks.length });
+        return htmlChunks.join('\n\n');
+      }
+    }
+  }
+
+  logFeedback('Failed to collect mailing HTML');
+  return '';
+}
+
+function ensurePRFeedbackButton() {
+  const buttons = $$('button.ui-button__root, button.publisher-mailings-design-bee__button');
+  const saveBtn = buttons.find(btn => (btn.textContent || '').trim().toLowerCase() === 'save as template');
+  if (!saveBtn || saveBtn.dataset.sprFeedbackAttached) return;
+  logFeedback('Injecting PR Feedback button');
+
+  const askBtn = document.createElement('button');
+  askBtn.type = 'button';
+  askBtn.className = 'publisher-mailings-design-bee__button ui-button__root ui-button__root--default ui-button__root--big spr-feedback-btn';
+  askBtn.textContent = '✨ Ask feedback';
+  askBtn.dataset.sprFeedbackBtn = '1';
+  saveBtn.insertAdjacentElement('beforebegin', askBtn);
+  saveBtn.dataset.sprFeedbackAttached = '1';
+
+  askBtn.addEventListener('click', requestPRFeedback);
+
+  const mirror = () => {
+    const disabled = saveBtn.disabled
+      || saveBtn.classList.contains('ui-button__root--disabled')
+      || saveBtn.hasAttribute('disabled')
+      || saveBtn.getAttribute('aria-disabled') === 'true';
+    askBtn.disabled = !!disabled;
+    askBtn.style.opacity = disabled ? '0.6' : '';
+    askBtn.style.pointerEvents = disabled ? 'none' : '';
+  };
+  mirror();
+
+  const observer = new MutationObserver(mirror);
+  observer.observe(saveBtn, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
+  askBtn._sprFeedbackObserver = observer;
+}
+
 // Initial injection & observe SPA updates
-ensureInjected();
-new MutationObserver(() => ensureInjected()).observe(document.documentElement, { childList: true, subtree: true });
+function runInjections() {
+  ensureInjected();
+  ensurePRFeedbackButton();
+  logFeedback('Ran injection pass');
+}
+
+runInjections();
+new MutationObserver(runInjections).observe(document.documentElement, { childList: true, subtree: true });
 
 // Prefill modal subject whenever subject input changes
 (function watchSubjectField() {
