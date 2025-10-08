@@ -1,4 +1,4 @@
-// options.js — Settings page logic for Story Angle Suggestion Engine
+// options.js — Settings page logic for Smart.pr Labs: Angle Assistant
 const $ = (s) => document.querySelector(s);
 
 // Load saved key on open

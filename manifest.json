@@ -1,10 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Story Angle Suggestion Engine",
+  "name": "Smart.pr Labs",
   "version": "0.2.1",
-  "description": "Injects a 'Generate hooks' button to suggest newsworthy angles and headlines.",
+  "description": "Smart.pr Labs – includes the Angle Assistant to suggest newsworthy story angles inside Smart.pr.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["https://api.openai.com/*"],
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
   "background": {
   "service_worker": "background.js"
 },

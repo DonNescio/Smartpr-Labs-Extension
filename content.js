@@ -1,4 +1,4 @@
-/* content.js — Story Angle Suggestion Engine (MV3)
+/* content.js — Smart.pr Labs: Angle Assistant (MV3)
  * - Injects a "Generate angles" button next to Smart.pr "Create content"
  * - Mirrors disabled state of the native Create content button
  * - Modal with Subject (prefilled), optional Short description
@@ -98,7 +98,7 @@ function ensureModal() {
   wrap.innerHTML = `
     <div class="sase-card">
       <div class="sase-row">
-        <strong>Story Angle Suggestion Engine</strong>
+        <strong>Smart.pr Labs — Angle Assistant</strong>
         <button class="sase-btn secondary" id="sase-settings" title="Open settings">⚙️</button>
         <button class="sase-close" title="Close" id="sase-close">✕</button>
       </div>
