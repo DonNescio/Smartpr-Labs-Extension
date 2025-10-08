@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Story Angle Suggestion Engine",
+  "version": "0.2.1",
+  "description": "Injects a 'Generate hooks' button to suggest newsworthy angles and headlines.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["https://api.openai.com/*"],
+  "background": {
+  "service_worker": "background.js"
+},
+
+  "options_page": "options.html",
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://smart.pr/*",
+        "https://*.smart.pr/*",
+        "https://dontest.smart.pr/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}
