@@ -52,6 +52,79 @@ const storage = {
   set: (k, v) => new Promise(r => chrome.storage.sync.set({ [k]: v }, r)),
 };
 
+const localStore = {
+  get: (k, d = null) => new Promise(r => chrome.storage.local.get([k], v => r(v[k] ?? d))),
+  set: (k, v) => new Promise(r => chrome.storage.local.set({ [k]: v }, r)),
+};
+
+const FEATURE_KEYS = {
+  angleAssistant: 'feature_angle_assistant',
+  prFeedback: 'feature_pr_feedback',
+};
+
+const DEFAULT_FEATURE_FLAGS = {
+  angleAssistant: true,
+  prFeedback: true,
+};
+
+let featureFlags = { ...DEFAULT_FEATURE_FLAGS };
+let featuresReady = false;
+
+const normalizeFeatureValue = (value, fallback = true) => (typeof value === 'boolean' ? value : fallback);
+
+function loadFeatureFlags() {
+  return new Promise(resolve => {
+    chrome.storage.sync.get(Object.values(FEATURE_KEYS), stored => {
+      featureFlags = {
+        angleAssistant: normalizeFeatureValue(stored[FEATURE_KEYS.angleAssistant], DEFAULT_FEATURE_FLAGS.angleAssistant),
+        prFeedback: normalizeFeatureValue(stored[FEATURE_KEYS.prFeedback], DEFAULT_FEATURE_FLAGS.prFeedback),
+      };
+      featuresReady = true;
+      resolve(featureFlags);
+    });
+  });
+}
+
+function applyFeatureUpdates(partialFlags = {}) {
+  let changed = false;
+  const next = { ...featureFlags };
+  for (const key of Object.keys(partialFlags)) {
+    if (key in next && partialFlags[key] !== undefined && next[key] !== partialFlags[key]) {
+      next[key] = partialFlags[key];
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  featureFlags = next;
+  if (!featureFlags.angleAssistant) teardownAngleAssistant();
+  if (!featureFlags.prFeedback) teardownPRFeedback();
+  runInjections();
+}
+
+const USAGE_KEY = 'sase_usage';
+
+async function recordUsage(usage = {}) {
+  try {
+    const current = await localStore.get(USAGE_KEY, {
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      lastUpdated: 0,
+    });
+    const next = {
+      requests: (current.requests || 0) + 1,
+      promptTokens: (current.promptTokens || 0) + (usage.prompt_tokens || 0),
+      completionTokens: (current.completionTokens || 0) + (usage.completion_tokens || 0),
+      totalTokens: (current.totalTokens || 0) + (usage.total_tokens || ((usage.prompt_tokens || 0) + (usage.completion_tokens || 0))),
+      lastUpdated: Date.now(),
+    };
+    await localStore.set(USAGE_KEY, next);
+  } catch (err) {
+    console.debug('[Smartpr Labs] Failed to record usage', err);
+  }
+}
+
 function escapeHTML(s) {
   return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -96,7 +169,7 @@ async function getApiKey() {
   const key = await storage.get('sase_api', '');
   if (!key) {
     if (confirm('OpenAI API key not set. Open extension settings now?')) {
-      chrome.runtime.sendMessage({ action: 'openOptionsPage' });
+      chrome.runtime.sendMessage({ action: 'openOverviewPage' });
     }
     throw new Error('Missing API key');
   }
@@ -122,6 +195,7 @@ async function openAIChat(apiKey, systemPrompt, userPrompt, temperature = 0.8) {
     throw new Error(`OpenAI error: ${resp.status} ${err}`);
   }
   const data = await resp.json();
+  recordUsage(data?.usage || {}).catch(() => {});
   return data.choices?.[0]?.message?.content ?? '';
 }
 
@@ -378,7 +452,7 @@ function ensureModal() {
   // Wire controls
   $('#sase-close').onclick = () => $('#sase-modal').style.display = 'none';
   $('#sase-clear').onclick = () => { $('#sase-angles').innerHTML = ''; };
-  $('#sase-settings').onclick = () => chrome.runtime.sendMessage({ action: 'openOptionsPage' });
+  $('#sase-settings').onclick = () => chrome.runtime.sendMessage({ action: 'openOverviewPage' });
   $('#sase-gen-angles').onclick = onGenerateAngles;
 }
 
@@ -557,6 +631,7 @@ function resetPressRelease(container) {
 let mirrorInterval = null;
 
 function ensureInjected() {
+  if (!featureFlags.angleAssistant) return;
   // Match your Angular markup
   const candidates = $$('button.form-mailing-edit__button, button[ng-click="onDesignClick();"]');
   const createBtn = candidates.find(b => (b.textContent || '').trim().toLowerCase() === 'create content');
@@ -609,6 +684,10 @@ function ensureInjected() {
   // Watch attribute changes to keep in sync
   const attrObs = new MutationObserver(mirror);
   attrObs.observe(createBtn, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
+  if (createBtn._saseObserver) {
+    try { createBtn._saseObserver.disconnect(); } catch { /* ignore */ }
+  }
+  createBtn._saseObserver = attrObs;
 
   // Also poll lightly in case Angular swaps the node
   if (mirrorInterval) clearInterval(mirrorInterval);
@@ -619,6 +698,23 @@ function ensureInjected() {
     }
     mirror();
   }, 800);
+}
+
+function teardownAngleAssistant() {
+  if (mirrorInterval) {
+    clearInterval(mirrorInterval);
+    mirrorInterval = null;
+  }
+  $$('.sase-generate-btn').forEach(btn => btn.remove());
+  const modal = $('#sase-modal');
+  if (modal) modal.remove();
+  $$('[data-sase-injected]').forEach(btn => {
+    if (btn._saseObserver) {
+      try { btn._saseObserver.disconnect(); } catch { /* ignore */ }
+      delete btn._saseObserver;
+    }
+    btn.removeAttribute('data-sase-injected');
+  });
 }
 
 // ---------- PR Feedback Assistant ----------
@@ -804,6 +900,7 @@ async function collectMailingHTML() {
 }
 
 function ensurePRFeedbackButton() {
+  if (!featureFlags.prFeedback) return;
   const buttons = $$('button.ui-button__root, button.publisher-mailings-design-bee__button');
   const saveBtn = buttons.find(btn => (btn.textContent || '').trim().toLowerCase() === 'save as template');
   if (!saveBtn || saveBtn.dataset.sprFeedbackAttached) return;
@@ -835,15 +932,64 @@ function ensurePRFeedbackButton() {
   askBtn._sprFeedbackObserver = observer;
 }
 
-// Initial injection & observe SPA updates
-function runInjections() {
-  ensureInjected();
-  ensurePRFeedbackButton();
-  logFeedback('Ran injection pass');
+function teardownPRFeedback() {
+  const panel = $('#spr-feedback-panel');
+  if (panel) panel.remove();
+  $$('.spr-feedback-btn').forEach(btn => {
+    if (btn._sprFeedbackObserver) {
+      try { btn._sprFeedbackObserver.disconnect(); } catch { /* ignore */ }
+      delete btn._sprFeedbackObserver;
+    }
+    btn.remove();
+  });
+  $$('[data-spr-feedback-attached]').forEach(btn => {
+    btn.removeAttribute('data-spr-feedback-attached');
+  });
+  hideFeedbackPanel();
 }
 
-runInjections();
-new MutationObserver(runInjections).observe(document.documentElement, { childList: true, subtree: true });
+// Initial injection & observe SPA updates
+function runInjections() {
+  if (!featuresReady) return;
+
+  if (featureFlags.angleAssistant) {
+    ensureInjected();
+  } else {
+    teardownAngleAssistant();
+  }
+
+  if (featureFlags.prFeedback) {
+    ensurePRFeedbackButton();
+    logFeedback('Ran injection pass');
+  } else {
+    teardownPRFeedback();
+  }
+}
+
+let injectionObserver = null;
+
+async function initFeatures() {
+  await loadFeatureFlags();
+  runInjections();
+  if (!injectionObserver) {
+    injectionObserver = new MutationObserver(runInjections);
+    injectionObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+}
+
+initFeatures();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'sync') return;
+  const updates = {};
+  if (FEATURE_KEYS.angleAssistant in changes) {
+    updates.angleAssistant = normalizeFeatureValue(changes[FEATURE_KEYS.angleAssistant].newValue, DEFAULT_FEATURE_FLAGS.angleAssistant);
+  }
+  if (FEATURE_KEYS.prFeedback in changes) {
+    updates.prFeedback = normalizeFeatureValue(changes[FEATURE_KEYS.prFeedback].newValue, DEFAULT_FEATURE_FLAGS.prFeedback);
+  }
+  applyFeatureUpdates(updates);
+});
 
 // Prefill modal subject whenever subject input changes
 (function watchSubjectField() {
