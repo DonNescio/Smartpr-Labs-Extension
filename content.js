@@ -202,12 +202,55 @@ async function openAIChat(apiKey, systemPrompt, userPrompt, temperature = 0.8) {
     })
   });
   if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`OpenAI error: ${resp.status} ${err}`);
+    let raw = '';
+    let message = '';
+    let code = '';
+    try {
+      raw = await resp.text();
+      try {
+        const parsed = JSON.parse(raw);
+        message = parsed?.error?.message || parsed?.message || '';
+        code = parsed?.error?.code || parsed?.error?.type || '';
+      } catch {
+        message = raw;
+      }
+    } catch {
+      message = '';
+    }
+    const error = new Error(message || `OpenAI request failed (${resp.status})`);
+    error.status = resp.status;
+    error.raw = raw;
+    if (!code) {
+      if (/insufficient_quota|exceeded.+quota/i.test(message)) code = 'quota_exceeded';
+      else code = `http_${resp.status}`;
+    }
+    error.code = code;
+    if (/insufficient_quota|exceeded.+quota/i.test(message)) {
+      error.code = 'quota_exceeded';
+    }
+    throw error;
   }
   const data = await resp.json();
   recordUsage(data?.usage || {}).catch(() => {});
   return data.choices?.[0]?.message?.content ?? '';
+}
+
+function getOpenAIErrorMessage(err, fallback = 'Something went wrong. Please try again.') {
+  if (!err) return fallback;
+  const rawMessage = typeof err.message === 'string' ? err.message : '';
+  const lower = rawMessage.toLowerCase();
+  const code = typeof err.code === 'string' ? err.code.toLowerCase() : '';
+
+  if (code === 'quota_exceeded' || /insufficient_quota|exceeded.+quota/.test(lower)) {
+    return 'OpenAI quota exceeded. Add credits or use a different API key.';
+  }
+  if (err.status === 401 || /invalid api key|incorrect api key/.test(lower)) {
+    return 'OpenAI API key looks invalid. Please update it in the extension settings.';
+  }
+  if (err.status === 429 || /rate limit/.test(lower)) {
+    return 'OpenAI rate limit reached. Wait a moment and try again.';
+  }
+  return fallback;
 }
 
 const PR_FEEDBACK_SYSTEM_PROMPT = `
@@ -526,7 +569,7 @@ All output must stay in the same language as the subject line.`;
     renderAngles(parsed?.angles || []);
   } catch (e) {
     console.error('[SASE] angles error', e);
-    toast('Error generating angles.');
+    toast(getOpenAIErrorMessage(e, 'Error generating angles.'));
   } finally {
     setBusy('#sase-gen-angles', false);
   }
@@ -611,7 +654,7 @@ Language requirement: Match the language used in the angle/subject.`;
     showPR(container, text);
   } catch (e) {
     console.error('[SASE] PR from angle error', e);
-    toast('Error writing press release.');
+    toast(getOpenAIErrorMessage(e, 'Error writing press release.'));
     resetPressRelease(container);
   } finally {
     setPressReleaseBusy(container, false);
@@ -1060,7 +1103,7 @@ async function handleParagraphOverlayClick() {
     }
   } catch (err) {
     console.error('[Smartpr Labs][ParagraphWriter] Failed to write paragraph', err);
-    toast('Could not generate a paragraph. Please try again.');
+    toast(getOpenAIErrorMessage(err, 'Could not generate a paragraph. Please try again.'));
     lastGeneratedParagraph = '';
     setParagraphOverlayBusy(false);
   }
@@ -1335,7 +1378,8 @@ async function requestPRFeedback() {
     logFeedback('Received feedback from OpenAI', { length: feedback ? feedback.length : 0 });
   } catch (err) {
     console.error('[SASE] PR feedback error', err);
-    setFeedbackPanelState('error', 'Could not fetch PR feedback. Please try again.');
+    const friendly = getOpenAIErrorMessage(err, 'Could not fetch PR feedback. Please try again.');
+    setFeedbackPanelState('error', friendly);
     logFeedback('OpenAI request failed', err?.message || err);
   }
 }
