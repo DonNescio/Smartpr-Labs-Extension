@@ -844,6 +844,10 @@ function ensureParagraphOverlay() {
   button.addEventListener('click', handleParagraphOverlayClick);
   button.addEventListener('mouseenter', () => button.style.background = '#f1f5ff');
   button.addEventListener('mouseleave', () => button.style.background = '#ffffff');
+  button.addEventListener('mousedown', evt => {
+    evt.preventDefault();
+  });
+  button.tabIndex = -1;
 
   contentWrap.appendChild(label);
   contentWrap.appendChild(hint);
