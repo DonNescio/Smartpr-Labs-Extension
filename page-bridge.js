@@ -3,11 +3,14 @@
   const RESPONSE = 'SPR_FEEDBACK_HTML';
   const READY = 'SPR_FEEDBACK_BRIDGE_READY';
   const PING = 'SPR_FEEDBACK_BRIDGE_PING';
+  const PARAGRAPH_STATUS_EVENT = 'SPR_PARAGRAPH_STATUS';
+  const PARAGRAPH_PLACEHOLDER_TEXT = "I'm a new paragraph block.";
   const RESPONSE_TIMEOUT = 6000;
 
   let latestApi = null;
   let hookInterval = null;
   const pending = new Map();
+  let paragraphMonitor = null;
 
   function log(...args) {
     try {
@@ -63,6 +66,7 @@
     for (const id of Array.from(pending.keys())) {
       fulfill(id);
     }
+    initParagraphMonitor(api);
   }
 
   function reply(id, html) {
@@ -262,6 +266,251 @@
     candidates.forEach(obj => {
       if (isApiCandidate(obj)) setLatestApi(obj);
     });
+  }
+
+  function initParagraphMonitor(api) {
+    if (!api) return;
+    if (paragraphMonitor && typeof paragraphMonitor.dispose === 'function') {
+      try { paragraphMonitor.dispose(); } catch { /* ignore */ }
+    }
+    paragraphMonitor = createParagraphMonitor(api);
+  }
+
+  function createParagraphMonitor(api) {
+    const state = {
+      api,
+      selectedBlockId: null,
+      timer: null,
+      disposed: false,
+      lastSignature: '',
+      unsubscribes: [],
+    };
+
+    const schedule = (delay = 160) => {
+      if (state.disposed) return;
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        if (state.disposed) return;
+        evaluateParagraphState(state);
+      }, delay);
+    };
+
+    const selectionHandler = payload => {
+      const id = extractBlockId(payload);
+      if (id) state.selectedBlockId = id;
+      schedule(120);
+    };
+
+    const changeHandler = () => schedule(200);
+
+    subscribeToParagraphEvents(api, selectionHandler, changeHandler, state);
+    schedule(0);
+
+    return {
+      dispose() {
+        state.disposed = true;
+        if (state.timer) clearTimeout(state.timer);
+        state.unsubscribes.forEach(fn => {
+          try { fn(); } catch { /* ignore */ }
+        });
+        state.unsubscribes.length = 0;
+      }
+    };
+  }
+
+  function subscribeToParagraphEvents(api, onSelection, onChange, state) {
+    const addUnsub = fn => { if (typeof fn === 'function') state.unsubscribes.push(fn); };
+    const selectionEvents = ['selection:changed', 'block:select', 'content:select', 'row:select', 'column:select'];
+    const changeEvents = ['content:changed', 'block:changed', 'editor:change', 'apply:history', 'undo', 'redo'];
+
+    if (api && typeof api.on === 'function') {
+      selectionEvents.forEach(evt => {
+        try {
+          api.on(evt, onSelection);
+          addUnsub(() => { try { api.off?.(evt, onSelection); } catch { /* ignore */ } });
+        } catch { /* ignore subscribe errors */ }
+      });
+      changeEvents.forEach(evt => {
+        try {
+          api.on(evt, onChange);
+          addUnsub(() => { try { api.off?.(evt, onChange); } catch { /* ignore */ } });
+        } catch { /* ignore subscribe errors */ }
+      });
+    }
+
+    if (api && typeof api.addEventListener === 'function') {
+      selectionEvents.forEach(evt => {
+        try {
+          api.addEventListener(evt, onSelection);
+          addUnsub(() => { try { api.removeEventListener?.(evt, onSelection); } catch { /* ignore */ } });
+        } catch { /* ignore */ }
+      });
+      changeEvents.forEach(evt => {
+        try {
+          api.addEventListener(evt, onChange);
+          addUnsub(() => { try { api.removeEventListener?.(evt, onChange); } catch { /* ignore */ } });
+        } catch { /* ignore */ }
+      });
+    }
+
+    const editor = api && (api.editor || (typeof api.getEditor === 'function' ? api.getEditor() : null));
+    const editorEvents = ['NodeChange', 'SelectionChange', 'Change', 'KeyUp', 'SetContent'];
+    if (editor && typeof editor.on === 'function') {
+      editorEvents.forEach(evt => {
+        try {
+          editor.on(evt, onChange);
+          addUnsub(() => {
+            try { editor.off?.(evt, onChange); } catch { /* ignore */ }
+          });
+        } catch { /* ignore */ }
+      });
+    }
+  }
+
+  async function evaluateParagraphState(state) {
+    try {
+      const json = await requestBeeJson(state.api);
+      if (!json) return;
+      let block = null;
+      if (state.selectedBlockId) {
+        block = findBlockById(json, state.selectedBlockId);
+      }
+      if (!block) {
+        block = findSelectedTextBlock(json);
+      }
+      if (!block) {
+        post({ type: PARAGRAPH_STATUS_EVENT, status: { blockId: null, blockType: '', isText: false, isEmpty: false, version: Date.now(), source: 'api' } });
+        return;
+      }
+      const blockId = getBlockId(block);
+      const blockType = block.type || block.content?.type || block.category || '';
+      const isText = isTextBlock(block);
+      const isEmpty = isBlockEmpty(block);
+      const signature = `${blockId ?? ''}|${isText ? 1 : 0}|${isEmpty ? 1 : 0}`;
+      if (signature === state.lastSignature) return;
+      state.lastSignature = signature;
+      post({
+        type: PARAGRAPH_STATUS_EVENT,
+        status: {
+          blockId,
+          blockType,
+          isText,
+          isEmpty,
+          version: Date.now(),
+          source: 'api'
+        }
+      });
+    } catch (err) {
+      log('Paragraph monitor evaluation failed', err?.message || err);
+    }
+  }
+
+  function extractBlockId(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    if (typeof payload.blockId === 'string') return payload.blockId;
+    if (typeof payload.id === 'string') return payload.id;
+    if (payload.block && typeof payload.block.id === 'string') return payload.block.id;
+    if (payload.content && typeof payload.content.id === 'string') return payload.content.id;
+    if (typeof payload.uid === 'string') return payload.uid;
+    if (typeof payload.cid === 'string') return payload.cid;
+    return null;
+  }
+
+  function requestBeeJson(api) {
+    return new Promise(resolve => {
+      if (!api || typeof api.getJson !== 'function') {
+        resolve(null);
+        return;
+      }
+      try {
+        const result = api.getJson(json => resolve(json || null));
+        if (result && typeof result.then === 'function') {
+          result.then(json => resolve(json || null)).catch(() => resolve(null));
+        } else if (result && typeof result === 'object') {
+          resolve(result);
+        }
+      } catch (err) {
+        log('getJson failed', err?.message || err);
+        resolve(null);
+      }
+      setTimeout(() => resolve(null), 4000);
+    });
+  }
+
+  function findBlockById(node, id) {
+    if (!node || !id || typeof node !== 'object') return null;
+    if (getBlockId(node) === id) return node;
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (!value) continue;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = findBlockById(item, id);
+          if (found) return found;
+        }
+      } else if (typeof value === 'object') {
+        const found = findBlockById(value, id);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function findSelectedTextBlock(node) {
+    let match = null;
+    const visit = current => {
+      if (!current || typeof current !== 'object' || match) return;
+      if (isTextBlock(current) && (current.selected || current.isSelected || current.focused || current.active)) {
+        match = current;
+        return;
+      }
+      for (const key of Object.keys(current)) {
+        const value = current[key];
+        if (!value) continue;
+        if (Array.isArray(value)) {
+          value.forEach(visit);
+        } else if (typeof value === 'object') {
+          visit(value);
+        }
+      }
+    };
+    visit(node);
+    return match;
+  }
+
+  function getBlockId(block) {
+    if (!block || typeof block !== 'object') return null;
+    return block.id || block.blockId || block.uid || block.cid || null;
+  }
+
+  function isTextBlock(block) {
+    if (!block || typeof block !== 'object') return false;
+    const type = (block.type || block.content?.type || block.category || '').toString().toLowerCase();
+    if (!type) return false;
+    return type.includes('text') || type.includes('paragraph') || type.includes('body') || type.includes('copy');
+  }
+
+  function stripHtml(html) {
+    return (html || '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isBlockEmpty(block) {
+    if (!block || typeof block !== 'object') return false;
+    const content = block.content || block.values || {};
+    let html = '';
+    if (typeof content.html === 'string') html = content.html;
+    else if (typeof content.text === 'string') html = content.text;
+    else if (typeof block.html === 'string') html = block.html;
+    const text = stripHtml(html);
+    if (!text) return true;
+    return text.toLowerCase() === PARAGRAPH_PLACEHOLDER_TEXT.toLowerCase();
   }
 
   window.addEventListener('message', event => {

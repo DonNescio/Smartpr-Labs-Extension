@@ -10,11 +10,13 @@ const clearBtn = $('#clear');
 const FEATURE_KEYS = {
   angleAssistant: 'feature_angle_assistant',
   prFeedback: 'feature_pr_feedback',
+  paragraphWriter: 'feature_paragraph_writer',
 };
 
 const DEFAULT_FEATURE_STATE = {
   angleAssistant: true,
   prFeedback: true,
+  paragraphWriter: true,
 };
 
 let featureState = { ...DEFAULT_FEATURE_STATE };
@@ -36,11 +38,13 @@ const usageCostEls = {
 const featureButtons = {
   angleAssistant: $('#toggle-angle'),
   prFeedback: $('#toggle-feedback'),
+  paragraphWriter: $('#toggle-paragraph'),
 };
 
 const featureStatus = {
   angleAssistant: $('#status-angle'),
   prFeedback: $('#status-feedback'),
+  paragraphWriter: $('#status-paragraph'),
 };
 
 const RATE_PROMPT = 0.00015; // USD per 1K tokens
@@ -146,6 +150,7 @@ function loadFeatures() {
     featureState = {
       angleAssistant: normalizeFeatureValue(stored[FEATURE_KEYS.angleAssistant], DEFAULT_FEATURE_STATE.angleAssistant),
       prFeedback: normalizeFeatureValue(stored[FEATURE_KEYS.prFeedback], DEFAULT_FEATURE_STATE.prFeedback),
+      paragraphWriter: normalizeFeatureValue(stored[FEATURE_KEYS.paragraphWriter], DEFAULT_FEATURE_STATE.paragraphWriter),
     };
     updateFeatureUI();
   });
@@ -228,6 +233,10 @@ function init() {
       }
       if (changes[FEATURE_KEYS.prFeedback]) {
         nextState.prFeedback = normalizeFeatureValue(changes[FEATURE_KEYS.prFeedback].newValue, DEFAULT_FEATURE_STATE.prFeedback);
+        dirty = true;
+      }
+      if (changes[FEATURE_KEYS.paragraphWriter]) {
+        nextState.paragraphWriter = normalizeFeatureValue(changes[FEATURE_KEYS.paragraphWriter].newValue, DEFAULT_FEATURE_STATE.paragraphWriter);
         dirty = true;
       }
       if (dirty) {

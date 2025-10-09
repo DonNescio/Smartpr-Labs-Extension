@@ -60,12 +60,21 @@ const localStore = {
 const FEATURE_KEYS = {
   angleAssistant: 'feature_angle_assistant',
   prFeedback: 'feature_pr_feedback',
+  paragraphWriter: 'feature_paragraph_writer',
 };
 
 const DEFAULT_FEATURE_FLAGS = {
   angleAssistant: true,
   prFeedback: true,
+  paragraphWriter: true,
 };
+
+const PARAGRAPH_PLACEHOLDER_TEXT = "I'm a new paragraph block.";
+const BEE_FRAME_ORIGIN = 'https://app.getbee.io';
+const PARAGRAPH_STATUS_EVENT = 'SPR_PARAGRAPH_STATUS';
+const PARAGRAPH_FRAME_STATUS_EVENT = 'SPR_PARAGRAPH_FRAME_STATUS';
+const PARAGRAPH_APPLY_EVENT = 'SPR_PARAGRAPH_APPLY';
+const PARAGRAPH_APPLY_RESULT_EVENT = 'SPR_PARAGRAPH_APPLY_RESULT';
 
 let featureFlags = { ...DEFAULT_FEATURE_FLAGS };
 let featuresReady = false;
@@ -78,6 +87,7 @@ function loadFeatureFlags() {
       featureFlags = {
         angleAssistant: normalizeFeatureValue(stored[FEATURE_KEYS.angleAssistant], DEFAULT_FEATURE_FLAGS.angleAssistant),
         prFeedback: normalizeFeatureValue(stored[FEATURE_KEYS.prFeedback], DEFAULT_FEATURE_FLAGS.prFeedback),
+        paragraphWriter: normalizeFeatureValue(stored[FEATURE_KEYS.paragraphWriter], DEFAULT_FEATURE_FLAGS.paragraphWriter),
       };
       featuresReady = true;
       resolve(featureFlags);
@@ -98,6 +108,7 @@ function applyFeatureUpdates(partialFlags = {}) {
   featureFlags = next;
   if (!featureFlags.angleAssistant) teardownAngleAssistant();
   if (!featureFlags.prFeedback) teardownPRFeedback();
+  if (!featureFlags.paragraphWriter) teardownParagraphWriter();
   runInjections();
 }
 
@@ -232,6 +243,22 @@ List practical next steps or short rewrite examples showing how to fix the probl
 - Do not include raw HTML.
 `;
 
+const PARAGRAPH_WRITER_SYSTEM_PROMPT = `
+You are a senior email copywriter assisting a Smart.pr user while they draft a mailing.
+You receive the raw HTML of the entire mailing that is currently being edited.
+
+Your job: write the next paragraph that continues the story naturally.
+
+Guidelines:
+1. Strip all HTML and read only the text.
+2. Detect the dominant language (Dutch or English) and respond entirely in that language.
+3. Match the existing tone, voice, and level of formality.
+4. Provide exactly one new paragraph (2–4 sentences) that adds new information, insight, or value.
+5. Avoid repeating existing sentences, avoid greetings or farewells, and do not include unsubscribe or legal boilerplate.
+
+Return plain text only — no quotation marks, markdown, bullets, or HTML.
+`;
+
 
 
 
@@ -321,21 +348,33 @@ function showFeedbackInputModal() {
 }
 
 function handleBridgeMessage(event) {
-  if (event.source !== window || !event.data || typeof event.data !== 'object') return;
+  if (!event || !event.data || typeof event.data !== 'object') return;
   const { type, html, id } = event.data;
-  if (type === BRIDGE_READY) {
-    bridgeReady = true;
-    const waiters = bridgeReadyWaiters.slice();
-    bridgeReadyWaiters = [];
-    waiters.forEach(fn => { try { fn(); } catch { /* ignore */ } });
-    logFeedback('Bridge reported ready');
-  } else if (type === BRIDGE_RESPONSE && id) {
-    const pending = bridgeHtmlRequests.get(id);
-    if (!pending) return;
-    bridgeHtmlRequests.delete(id);
-    clearTimeout(pending.timeout);
-    pending.resolve(typeof html === 'string' ? html.trim() : '');
-    logFeedback('Received HTML from bridge', { id, length: html ? html.length : 0 });
+  if (!type) return;
+
+  if (event.source === window) {
+    if (type === BRIDGE_READY) {
+      bridgeReady = true;
+      const waiters = bridgeReadyWaiters.slice();
+      bridgeReadyWaiters = [];
+      waiters.forEach(fn => { try { fn(); } catch { /* ignore */ } });
+      logFeedback('Bridge reported ready');
+    } else if (type === BRIDGE_RESPONSE && id) {
+      const pending = bridgeHtmlRequests.get(id);
+      if (!pending) return;
+      bridgeHtmlRequests.delete(id);
+      clearTimeout(pending.timeout);
+      pending.resolve(typeof html === 'string' ? html.trim() : '');
+      logFeedback('Received HTML from bridge', { id, length: html ? html.length : 0 });
+    } else if (type === PARAGRAPH_STATUS_EVENT) {
+      onParagraphStatus(event.data);
+    }
+  } else if (typeof event.origin === 'string' && event.origin.includes('app.getbee.io')) {
+    if (type === PARAGRAPH_FRAME_STATUS_EVENT) {
+      onParagraphFrameStatus(event.data);
+    } else if (type === PARAGRAPH_APPLY_RESULT_EVENT) {
+      onParagraphApplyResult(event.data);
+    }
   }
 }
 
@@ -717,6 +756,379 @@ function teardownAngleAssistant() {
   });
 }
 
+// ---------- Paragraph Writer ----------
+let paragraphOverlayEl = null;
+let paragraphOverlayButton = null;
+let paragraphOverlayVisible = false;
+let paragraphOverlayBusy = false;
+let paragraphOverlayInitialized = false;
+let paragraphOverlayListenersAttached = false;
+let paragraphWriterInfo = {
+  blockId: null,
+  blockType: '',
+  isEmpty: false,
+  isText: false,
+  version: 0,
+  source: '',
+  timestamp: 0,
+  rect: null,
+};
+let lastGeneratedParagraph = '';
+let paragraphApplyTimeout = null;
+
+function initParagraphWriter() {
+  if (!featureFlags.paragraphWriter) return;
+  ensureParagraphOverlay();
+  attachParagraphOverlayListeners();
+  paragraphOverlayInitialized = true;
+}
+
+function ensureParagraphOverlay() {
+  if (paragraphOverlayEl) return paragraphOverlayEl;
+  const overlay = document.createElement('div');
+  overlay.id = 'spr-paragraph-overlay';
+  Object.assign(overlay.style, {
+    position: 'fixed',
+    zIndex: '1000001',
+    display: 'none',
+    alignItems: 'center',
+    gap: '8px',
+    background: '#0f2c36',
+    color: '#e7f3f7',
+    padding: '10px 14px',
+    borderRadius: '12px',
+    boxShadow: '0 12px 32px rgba(7,24,33,0.18)'
+  });
+
+  const label = document.createElement('span');
+  label.textContent = 'Paragraph Writer';
+  Object.assign(label.style, {
+    font: '600 13px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
+    letterSpacing: '0.01em'
+  });
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'spr-paragraph-overlay-btn';
+  button.textContent = '✨ Write paragraph';
+  Object.assign(button.style, {
+    font: '600 13px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
+    padding: '8px 12px',
+    borderRadius: '10px',
+    border: '1px solid rgba(231,243,247,0.35)',
+    background: '#14c4a3',
+    color: '#071821',
+    cursor: 'pointer'
+  });
+  button.addEventListener('click', handleParagraphOverlayClick);
+
+  overlay.appendChild(label);
+  overlay.appendChild(button);
+  document.body.appendChild(overlay);
+
+  paragraphOverlayEl = overlay;
+  paragraphOverlayButton = button;
+  return overlay;
+}
+
+function attachParagraphOverlayListeners() {
+  if (paragraphOverlayListenersAttached) return;
+  const reposition = () => positionParagraphOverlay();
+  window.addEventListener('scroll', reposition, true);
+  window.addEventListener('resize', reposition, true);
+  paragraphOverlayListenersAttached = true;
+}
+
+function detachParagraphOverlayListeners() {
+  if (!paragraphOverlayListenersAttached) return;
+  window.removeEventListener('scroll', positionParagraphOverlay, true);
+  window.removeEventListener('resize', positionParagraphOverlay, true);
+  paragraphOverlayListenersAttached = false;
+}
+
+function positionParagraphOverlay() {
+  if (!paragraphOverlayEl || paragraphOverlayEl.style.display === 'none') return;
+  const frame = getBeeIframe();
+  if (!frame) {
+    hideParagraphOverlay(true);
+    return;
+  }
+  const frameRect = frame.getBoundingClientRect();
+  if (!frameRect || frameRect.width <= 0 || frameRect.height <= 0) {
+    hideParagraphOverlay(true);
+    return;
+  }
+  const overlayWidth = paragraphOverlayEl.offsetWidth || 220;
+  const overlayHeight = paragraphOverlayEl.offsetHeight || 48;
+  const offset = 12;
+
+  const blockRect = paragraphWriterInfo.rect;
+  if (blockRect && blockRect.width > 0 && blockRect.height > 0) {
+    let left = frameRect.left + blockRect.left + blockRect.width - overlayWidth + offset;
+    let top = frameRect.top + blockRect.top - overlayHeight - offset;
+    if (left < frameRect.left + offset) left = frameRect.left + blockRect.left + offset;
+    if (top < frameRect.top + offset) {
+      top = frameRect.top + blockRect.top + blockRect.height + offset;
+    }
+    paragraphOverlayEl.style.left = `${Math.max(left, 12)}px`;
+    paragraphOverlayEl.style.top = `${Math.max(top, 12)}px`;
+    return;
+  }
+
+  const leftFallback = frameRect.right - overlayWidth - offset;
+  const topFallback = frameRect.bottom - overlayHeight - offset;
+  paragraphOverlayEl.style.left = `${Math.max(leftFallback, frameRect.left + offset, 12)}px`;
+  paragraphOverlayEl.style.top = `${Math.max(topFallback, frameRect.top + offset, 12)}px`;
+}
+
+function getBeeIframe() {
+  return document.querySelector('iframe[src*="app.getbee.io"]');
+}
+
+function showParagraphOverlay() {
+  if (!featureFlags.paragraphWriter) return;
+  const overlay = ensureParagraphOverlay();
+  overlay.style.display = 'flex';
+  paragraphOverlayVisible = true;
+  setParagraphOverlayBusy(paragraphOverlayBusy);
+  positionParagraphOverlay();
+}
+
+function hideParagraphOverlay(force = false) {
+  if (!paragraphOverlayEl) return;
+  if (paragraphOverlayBusy && !force) return;
+  paragraphOverlayEl.style.display = 'none';
+  paragraphOverlayVisible = false;
+}
+
+function setParagraphOverlayBusy(busy) {
+  paragraphOverlayBusy = !!busy;
+  if (!paragraphOverlayButton) ensureParagraphOverlay();
+  if (!paragraphOverlayButton) return;
+  paragraphOverlayButton.disabled = paragraphOverlayBusy;
+  paragraphOverlayButton.textContent = paragraphOverlayBusy ? 'Writing…' : '✨ Write paragraph';
+  paragraphOverlayButton.style.opacity = paragraphOverlayBusy ? '0.7' : '';
+  paragraphOverlayButton.style.cursor = paragraphOverlayBusy ? 'default' : 'pointer';
+}
+
+function refreshParagraphOverlayVisibility() {
+  if (!featureFlags.paragraphWriter) {
+    hideParagraphOverlay(true);
+    return;
+  }
+  const eligible = paragraphWriterInfo.isText && paragraphWriterInfo.isEmpty;
+  if (eligible) {
+    showParagraphOverlay();
+  } else {
+    hideParagraphOverlay();
+  }
+  if (paragraphOverlayVisible) {
+    positionParagraphOverlay();
+  }
+}
+
+function onParagraphStatus(payload) {
+  if (!featureFlags.paragraphWriter) return;
+  const status = payload?.status && typeof payload.status === 'object' ? payload.status : payload;
+  if (!status || typeof status !== 'object') {
+    if (!paragraphOverlayBusy) hideParagraphOverlay();
+    return;
+  }
+  const blockType = status.blockType || status.type || paragraphWriterInfo.blockType || '';
+  const isText = status.isText !== undefined ? !!status.isText : isTextualBlockType(blockType);
+  paragraphWriterInfo = {
+    blockId: status.blockId ?? paragraphWriterInfo.blockId ?? null,
+    blockType,
+    isEmpty: !!status.isEmpty,
+    isText,
+    version: typeof status.version === 'number' ? status.version : (paragraphWriterInfo.version + 1),
+    source: status.source || 'api',
+    timestamp: Date.now(),
+    rect: normalizeParagraphRect(status.rect) ?? paragraphWriterInfo.rect ?? null,
+  };
+  if (!paragraphOverlayBusy) {
+    refreshParagraphOverlayVisibility();
+  }
+  positionParagraphOverlay();
+}
+
+function onParagraphFrameStatus(payload) {
+  if (!featureFlags.paragraphWriter || !payload || typeof payload !== 'object') return;
+  const text = normalizeParagraphString(payload.text || '');
+  const isEmpty = payload.isEmpty !== undefined
+    ? !!payload.isEmpty
+    : !text || text.toLowerCase() === PARAGRAPH_PLACEHOLDER_TEXT.toLowerCase();
+  paragraphWriterInfo = {
+    blockId: payload.editorId ?? paragraphWriterInfo.blockId ?? null,
+    blockType: payload.blockType || paragraphWriterInfo.blockType || 'text',
+    isEmpty,
+    isText: true,
+    version: paragraphWriterInfo.version + 1,
+    source: 'frame',
+    timestamp: Date.now(),
+    rect: normalizeParagraphRect(payload.rect),
+  };
+  if (!paragraphOverlayBusy) {
+    refreshParagraphOverlayVisibility();
+  }
+  positionParagraphOverlay();
+}
+
+async function handleParagraphOverlayClick() {
+  if (paragraphOverlayBusy) return;
+  setParagraphOverlayBusy(true);
+  try {
+    const mailingHTML = await collectMailingHTML();
+    if (!mailingHTML) {
+      toast('Could not detect the mailing content.');
+      setParagraphOverlayBusy(false);
+      return;
+    }
+    let apiKey;
+    try {
+      apiKey = await getApiKey();
+    } catch {
+      setParagraphOverlayBusy(false);
+      return;
+    }
+    const userPrompt = `Here is the full HTML of the mailing currently open in Smart.pr:\n\n${mailingHTML}\n\nWrite the very next paragraph that should follow, using the dominant language of the mailing.`;
+    const result = await openAIChat(apiKey, PARAGRAPH_WRITER_SYSTEM_PROMPT, userPrompt, 0.7);
+    const paragraph = (result || '').trim();
+    if (!paragraph) {
+      toast('ChatGPT did not return a paragraph. Try again.');
+      setParagraphOverlayBusy(false);
+      return;
+    }
+    lastGeneratedParagraph = paragraph;
+    const html = buildParagraphHtml(paragraph);
+    if (!html) {
+      toast('Generated paragraph was empty.');
+      setParagraphOverlayBusy(false);
+      return;
+    }
+    if (dispatchParagraphToBee(html)) {
+      clearParagraphApplyTimeout();
+      paragraphApplyTimeout = setTimeout(() => {
+        setParagraphOverlayBusy(false);
+        refreshParagraphOverlayVisibility();
+      }, 4000);
+    } else {
+      setParagraphOverlayBusy(false);
+      await copyToClipboard(paragraph);
+      toast('Paragraph copied to clipboard.');
+      lastGeneratedParagraph = '';
+    }
+  } catch (err) {
+    console.error('[Smartpr Labs][ParagraphWriter] Failed to write paragraph', err);
+    toast('Could not generate a paragraph. Please try again.');
+    lastGeneratedParagraph = '';
+    setParagraphOverlayBusy(false);
+  }
+}
+
+function dispatchParagraphToBee(html) {
+  const frame = getBeeIframe();
+  if (!frame || !frame.contentWindow) return false;
+  try {
+    frame.contentWindow.postMessage({
+      type: PARAGRAPH_APPLY_EVENT,
+      html,
+      blockId: paragraphWriterInfo.blockId,
+      source: 'smartpr-labs',
+      placeholder: PARAGRAPH_PLACEHOLDER_TEXT
+    }, BEE_FRAME_ORIGIN);
+    return true;
+  } catch (err) {
+    console.warn('[Smartpr Labs][ParagraphWriter] Failed to post message to BEE iframe', err);
+    return false;
+  }
+}
+
+function onParagraphApplyResult(payload) {
+  clearParagraphApplyTimeout();
+  setParagraphOverlayBusy(false);
+  if (payload?.success) {
+    paragraphWriterInfo.isEmpty = false;
+    toast('Paragraph drafted!');
+  } else if (lastGeneratedParagraph) {
+    copyToClipboard(lastGeneratedParagraph).then(() => {
+      toast('Paragraph copied to clipboard.');
+    }).catch(() => {
+      toast('Paragraph copied to clipboard.');
+    });
+  }
+  lastGeneratedParagraph = '';
+  refreshParagraphOverlayVisibility();
+}
+
+function clearParagraphApplyTimeout() {
+  if (paragraphApplyTimeout) {
+    clearTimeout(paragraphApplyTimeout);
+    paragraphApplyTimeout = null;
+  }
+}
+
+function buildParagraphHtml(text) {
+  if (!text) return '';
+  const escaped = escapeHTML(text.trim());
+  if (!escaped) return '';
+  const parts = escaped.split(/\n{2,}/).map(block => {
+    const withBreaks = block.replace(/\n/g, '<br>');
+    return `<p>${withBreaks}</p>`;
+  });
+  return parts.join('') || `<p>${escaped}</p>`;
+}
+
+function normalizeParagraphString(text) {
+  return (text || '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isTextualBlockType(type) {
+  if (!type || typeof type !== 'string') return false;
+  return /text|paragraph|body|copy|content/i.test(type);
+}
+
+function teardownParagraphWriter() {
+  clearParagraphApplyTimeout();
+  hideParagraphOverlay(true);
+  detachParagraphOverlayListeners();
+  if (paragraphOverlayEl) {
+    try { paragraphOverlayEl.remove(); } catch { /* ignore */ }
+  }
+  paragraphOverlayEl = null;
+  paragraphOverlayButton = null;
+  paragraphOverlayVisible = false;
+  paragraphOverlayBusy = false;
+  paragraphOverlayInitialized = false;
+  paragraphWriterInfo = {
+    blockId: null,
+    blockType: '',
+    isEmpty: false,
+    isText: false,
+    version: 0,
+    source: '',
+    timestamp: 0,
+    rect: null,
+  };
+  lastGeneratedParagraph = '';
+}
+
+function normalizeParagraphRect(rect) {
+  if (!rect || typeof rect !== 'object') return null;
+  const top = Number(rect.top);
+  const left = Number(rect.left);
+  const width = Number(rect.width);
+  const height = Number(rect.height);
+  if (!Number.isFinite(top) || !Number.isFinite(left) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  return { top, left, width, height };
+}
+
+
 // ---------- PR Feedback Assistant ----------
 function ensurePRFeedbackPanel() {
   if (!document.body) return null;
@@ -964,6 +1376,12 @@ function runInjections() {
   } else {
     teardownPRFeedback();
   }
+
+  if (featureFlags.paragraphWriter) {
+    initParagraphWriter();
+  } else {
+    teardownParagraphWriter();
+  }
 }
 
 let injectionObserver = null;
@@ -987,6 +1405,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (FEATURE_KEYS.prFeedback in changes) {
     updates.prFeedback = normalizeFeatureValue(changes[FEATURE_KEYS.prFeedback].newValue, DEFAULT_FEATURE_FLAGS.prFeedback);
+  }
+  if (FEATURE_KEYS.paragraphWriter in changes) {
+    updates.paragraphWriter = normalizeFeatureValue(changes[FEATURE_KEYS.paragraphWriter].newValue, DEFAULT_FEATURE_FLAGS.paragraphWriter);
   }
   applyFeatureUpdates(updates);
 });
