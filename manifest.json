@@ -14,6 +14,10 @@
   "service_worker": "background.js"
 },
 
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Smart.pr Labs"
+  },
   "options_page": "options.html",
 
   "content_scripts": [

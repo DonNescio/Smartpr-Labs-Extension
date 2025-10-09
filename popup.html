@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Smart.pr Labs</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 320px;
+      min-height: 260px;
+      padding: 20px;
+      font: 13px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: #0f1f27;
+      background: radial-gradient(circle at 18% 12%, rgba(68, 203, 186, 0.24), transparent 60%),
+                  radial-gradient(circle at 82% -10%, rgba(112, 139, 255, 0.32), transparent 55%),
+                  #0a1a21;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 12px 24px rgba(8, 26, 33, 0.18);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .badge {
+      align-self: flex-start;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #0a1a21;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: linear-gradient(130deg, #b4f0e5, #d8e5ff);
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: -0.02em;
+      color: #0a1a21;
+    }
+    .tagline {
+      margin: 0;
+      color: #385260;
+    }
+    .features {
+      display: grid;
+      gap: 8px;
+    }
+    .feature {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: #f5f8ff;
+      color: #1e3c4d;
+    }
+    .feature strong {
+      font-size: 13px;
+    }
+    .status {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 999px;
+      color: #0a412c;
+      background: rgba(76, 201, 147, 0.25);
+    }
+    .status.is-off {
+      color: #8c1e1e;
+      background: rgba(255, 99, 71, 0.2);
+    }
+    button {
+      font: inherit;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 16px;
+      background: linear-gradient(135deg, #0f7bff, #15c4a3);
+      color: white;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 18px rgba(15, 123, 255, 0.25);
+    }
+    .footer {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.68);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <span class="badge">Beta cockpit</span>
+      <h1>Smart.pr Labs overview</h1>
+      <p class="tagline">Fast-paced experiments to level up PR workflows before they roll out to everyone.</p>
+    </div>
+    <div class="features">
+      <div class="feature">
+        <strong>Angle Assistant</strong>
+        <span class="status" id="popup-status-angle">…</span>
+      </div>
+      <div class="feature">
+        <strong>PR Feedback Coach</strong>
+        <span class="status" id="popup-status-feedback">…</span>
+      </div>
+    </div>
+    <button id="open-overview">Open Labs overview</button>
+  </div>
+  <div class="footer">
+    Preview builds ship first in Labs. Expect rapid updates, sharp edges, and lots of ✨.
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
