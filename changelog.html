@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Smart.pr Labs – Changelog</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --spr-dark: #071821;
+      --spr-ink: #102b36;
+      --spr-muted: #56707d;
+      --spr-accent: #0f7bff;
+      --spr-accent-2: #14c4a3;
+      --spr-card: rgba(255, 255, 255, 0.96);
+      --spr-border: rgba(11, 38, 53, 0.1);
+      --spr-radius: 22px;
+      --spr-shadow: 0 24px 48px rgba(7, 24, 33, 0.14);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 60px 0;
+      font: 15px/1.6 "Inter var", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--spr-ink);
+      background:
+        radial-gradient(130% 160% at 10% -20%, rgba(20, 196, 163, 0.2), transparent 65%),
+        radial-gradient(180% 160% at 90% -30%, rgba(15, 123, 255, 0.25), transparent 70%),
+        #eef2f8;
+    }
+    .page {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 0 36px 80px;
+      display: flex;
+      flex-direction: column;
+      gap: 32px;
+    }
+    header {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .pill {
+      align-self: flex-start;
+      padding: 6px 16px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: var(--spr-dark);
+      border-radius: 999px;
+      background: linear-gradient(120deg, rgba(15, 123, 255, 0.18), rgba(20, 196, 163, 0.45));
+      box-shadow: inset 0 0 0 1px rgba(15, 43, 54, 0.08);
+    }
+    h1 {
+      margin: 0;
+      font-size: 44px;
+      letter-spacing: -0.03em;
+      color: var(--spr-dark);
+    }
+    .intro {
+      margin: 0;
+      font-size: 17px;
+      color: #27414d;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    button {
+      font: inherit;
+      padding: 11px 18px;
+      border-radius: 12px;
+      border: 1px solid rgba(15, 43, 54, 0.3);
+      cursor: pointer;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+      background: #0f2c36;
+      color: #f2fbff;
+    }
+    button.secondary {
+      background: rgba(255, 255, 255, 0.92);
+      color: #0f2c36;
+      border-color: rgba(15, 43, 54, 0.22);
+    }
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 24px rgba(15, 123, 255, 0.2);
+    }
+    button.secondary:hover {
+      background: rgba(15, 123, 255, 0.1);
+    }
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+    .entry {
+      background: var(--spr-card);
+      border-radius: var(--spr-radius);
+      padding: 26px 30px;
+      border: 1px solid var(--spr-border);
+      box-shadow: var(--spr-shadow);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .entry-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 18px;
+    }
+    .version {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(15, 43, 54, 0.72);
+    }
+    .date {
+      font-size: 13px;
+      color: var(--spr-muted);
+    }
+    .why {
+      margin: 0;
+      color: #2a4b58;
+    }
+    ul {
+      margin: 0;
+      padding-left: 20px;
+      color: #34505c;
+    }
+    li + li {
+      margin-top: 6px;
+    }
+    .footnote {
+      font-size: 12px;
+      color: var(--spr-muted);
+    }
+    a {
+      color: var(--spr-accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    @media (max-width: 720px) {
+      body { padding: 40px 0; }
+      .page { padding: 0 20px 60px; }
+      h1 { font-size: 34px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <span class="pill">Smart.pr Labs</span>
+      <h1>Changelog</h1>
+      <p class="intro">A simple list of what we built in Labs. Everything here was made in October 2025 to try ideas and see what actually helps.</p>
+      <div class="actions">
+        <button id="open-overview" type="button">Back to overview</button>
+        <button class="secondary" id="share-feedback" type="button">Share feedback</button>
+      </div>
+    </header>
+
+    <section class="timeline" aria-label="Recent updates">
+      <article class="entry">
+        <div class="entry-header">
+          <span class="version">Version 0.3.0</span>
+          <span class="date">October 2025</span>
+        </div>
+        <p class="why"><strong>Goal:</strong> Let teams try small ideas quickly without waiting for a full release.</p>
+        <ul>
+          <li><strong>Paragraph Writer</strong> suggests a short follow-up paragraph in the Bee editor to keep drafts moving.</li>
+          <li><strong>PR Feedback Coach</strong> gives quick checks on clarity and tone before sending.</li>
+          <li><strong>Angle Assistant</strong> helps find alternative angles and subject lines faster.</li>
+        </ul>
+        <p class="footnote">Experiments are on by default. You can switch them off from the overview.</p>
+      </article>
+
+      <article class="entry">
+        <div class="entry-header">
+          <span class="version">Version 0.2.0</span>
+          <span class="date">October 2025</span>
+        </div>
+        <p class="why"><strong>Goal:</strong> Make AI usage in Labs visible so you know what’s being used and roughly what it costs.</p>
+        <ul>
+          <li>Added a small usage dashboard with request counts, token totals, and cost estimates.</li>
+          <li>Feature toggles and API keys now sync across browsers and profiles.</li>
+        </ul>
+      </article>
+
+      <article class="entry">
+        <div class="entry-header">
+          <span class="version">Version 0.1.0</span>
+          <span class="date">October 2025</span>
+        </div>
+        <p class="why"><strong>Goal:</strong> Set up one place to try experiments and collect early feedback.</p>
+        <ul>
+          <li>Released the Labs overview with quick toggles and API key setup.</li>
+          <li>Opened the first beta of <strong>Angle Assistant</strong> for early testers.</li>
+        </ul>
+      </article>
+    </section>
+  </main>
+  <script src="changelog.js"></script>
+</body>
+</html>

@@ -70,6 +70,74 @@
     .feature strong {
       font-size: 13px;
     }
+    .global-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(15, 43, 54, 0.08);
+      border: 1px solid rgba(15, 43, 54, 0.12);
+    }
+    .toggle-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .toggle-copy strong {
+      font-size: 13px;
+      color: #0a1a21;
+    }
+    .toggle-copy span {
+      font-size: 12px;
+      color: rgba(15, 43, 54, 0.75);
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background: rgba(16, 43, 54, 0.35);
+      transition: background 0.2s ease;
+      border-radius: 999px;
+    }
+    .slider::before {
+      content: "";
+      position: absolute;
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      top: 3px;
+      background-color: #fff;
+      transition: transform 0.2s ease;
+      border-radius: 50%;
+      box-shadow: 0 4px 10px rgba(10, 26, 33, 0.24);
+    }
+    .switch input:checked + .slider {
+      background: linear-gradient(135deg, #0f7bff, #15c4a3);
+    }
+    .switch input:checked + .slider::before {
+      transform: translateX(20px);
+    }
+    .toggle-hint {
+      margin: 6px 0 0;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.72);
+      text-align: right;
+    }
+    .toggle-hint.is-off {
+      color: rgba(255, 206, 206, 0.88);
+    }
     .status {
       font-size: 11px;
       font-weight: 600;
@@ -126,6 +194,17 @@
         <span class="status" id="popup-status-paragraph">…</span>
       </div>
     </div>
+    <div class="global-toggle">
+      <div class="toggle-copy">
+        <strong>Running into bugs?</strong>
+        <span>Disable the extension.</span>
+      </div>
+      <label class="switch" aria-label="Toggle Smart.pr Labs">
+        <input type="checkbox" id="toggle-extension" checked />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <p class="toggle-hint" id="popup-extension-status">Extension is on.</p>
     <button id="open-overview">Open Labs overview</button>
   </div>
   <div class="footer">

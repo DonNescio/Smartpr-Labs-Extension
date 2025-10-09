@@ -6,6 +6,7 @@ const revealBtn = $('#reveal');
 const saveBtn = $('#save');
 const testBtn = $('#test');
 const clearBtn = $('#clear');
+const changelogBtn = document.getElementById('open-changelog');
 
 const FEATURE_KEYS = {
   angleAssistant: 'feature_angle_assistant',
@@ -215,12 +216,23 @@ function wireKeyHandlers() {
   }
 }
 
+function wireChangelogLink() {
+  if (!changelogBtn) return;
+  changelogBtn.onclick = () => {
+    const changelogUrl = chrome?.runtime?.getURL
+      ? chrome.runtime.getURL('changelog.html')
+      : 'changelog.html';
+    window.open(changelogUrl, '_blank');
+  };
+}
+
 function init() {
   loadFeatures();
   loadKey();
   refreshUsage();
   wireFeatureHandlers();
   wireKeyHandlers();
+  wireChangelogLink();
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.sase_usage) refreshUsage();
     if (area === 'sync') {

@@ -62,12 +62,15 @@ const FEATURE_KEYS = {
   prFeedback: 'feature_pr_feedback',
   paragraphWriter: 'feature_paragraph_writer',
 };
+const LABS_DISABLED_KEY = 'labs_disabled';
 
 const DEFAULT_FEATURE_FLAGS = {
   angleAssistant: true,
   prFeedback: true,
   paragraphWriter: true,
 };
+
+const STORAGE_KEYS = [...Object.values(FEATURE_KEYS), LABS_DISABLED_KEY];
 
 const PARAGRAPH_PLACEHOLDER_TEXT = "I'm a new paragraph block.";
 const BEE_FRAME_ORIGIN = 'https://app.getbee.io';
@@ -78,12 +81,14 @@ const PARAGRAPH_APPLY_RESULT_EVENT = 'SPR_PARAGRAPH_APPLY_RESULT';
 
 let featureFlags = { ...DEFAULT_FEATURE_FLAGS };
 let featuresReady = false;
+let extensionDisabled = false;
 
 const normalizeFeatureValue = (value, fallback = true) => (typeof value === 'boolean' ? value : fallback);
 
 function loadFeatureFlags() {
   return new Promise(resolve => {
-    chrome.storage.sync.get(Object.values(FEATURE_KEYS), stored => {
+    chrome.storage.sync.get(STORAGE_KEYS, stored => {
+      extensionDisabled = Boolean(stored[LABS_DISABLED_KEY]);
       featureFlags = {
         angleAssistant: normalizeFeatureValue(stored[FEATURE_KEYS.angleAssistant], DEFAULT_FEATURE_FLAGS.angleAssistant),
         prFeedback: normalizeFeatureValue(stored[FEATURE_KEYS.prFeedback], DEFAULT_FEATURE_FLAGS.prFeedback),
@@ -1483,9 +1488,20 @@ function teardownPRFeedback() {
   hideFeedbackPanel();
 }
 
+function teardownAllFeatures() {
+  teardownAngleAssistant();
+  teardownPRFeedback();
+  teardownParagraphWriter();
+}
+
 // Initial injection & observe SPA updates
 function runInjections() {
   if (!featuresReady) return;
+
+  if (extensionDisabled) {
+    teardownAllFeatures();
+    return;
+  }
 
   if (featureFlags.angleAssistant) {
     ensureInjected();
@@ -1531,6 +1547,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (FEATURE_KEYS.paragraphWriter in changes) {
     updates.paragraphWriter = normalizeFeatureValue(changes[FEATURE_KEYS.paragraphWriter].newValue, DEFAULT_FEATURE_FLAGS.paragraphWriter);
+  }
+  if (LABS_DISABLED_KEY in changes) {
+    const nextDisabled = Boolean(changes[LABS_DISABLED_KEY].newValue);
+    if (nextDisabled !== extensionDisabled) {
+      extensionDisabled = nextDisabled;
+      if (extensionDisabled) {
+        teardownAllFeatures();
+      }
+      runInjections();
+    }
   }
   applyFeatureUpdates(updates);
 });

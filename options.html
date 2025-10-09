@@ -53,6 +53,25 @@
       flex-direction: column;
       gap: 14px;
     }
+    .hero-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-start;
+    }
+    .hero-actions p {
+      margin: 0;
+      font-size: 13px;
+      color: rgba(15, 43, 54, 0.72);
+    }
+    .hero a {
+      color: var(--spr-accent);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .hero a:hover {
+      text-decoration: underline;
+    }
     .hero-pill {
       align-self: flex-start;
       padding: 6px 16px;
@@ -193,6 +212,17 @@
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 18px;
     }
+    .metrics + .metric-title {
+      margin-top: 22px;
+    }
+    .metric-title {
+      margin: 28px 0 12px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--spr-muted);
+    }
     .metric {
       border-radius: 18px;
       padding: 18px 20px;
@@ -286,14 +316,27 @@
   </style>
 </head>
 <body>
-  <div class="page">
-    <header class="hero" aria-labelledby="labs-hero">
-      <div class="hero-main">
-        <span class="hero-pill">Smart.pr Labs</span>
-        <h1 id="labs-hero">Command center for rapid-release PR experiments</h1>
-        <p class="lead">Labs is where we stress-test ideas at sprint speed. Expect sharper workflows, unfinished edges, and a front-row seat to what’s coming next.</p>
-      </div>
-    </header>
+<div class="page">
+  <header class="hero" aria-labelledby="labs-hero">
+    <div class="hero-main">
+      <span class="hero-pill">Smart.pr Labs</span>
+      <h1 id="labs-hero">Try Smart.pr features early</h1>
+      <p class="lead">
+        Smart.pr Labs gives you early access to experimental tools and workflows. 
+        It’s where we test ideas quickly, learn from real use, and decide what’s worth adding to the main app.
+      </p>
+      <p class="lead">
+        Your feedback helps us shape what comes next.  
+        Got suggestions or want to report something? Email <a href="mailto:don@smart.pr">don@smart.pr</a> or message our support team in the Smart.pr app.
+      </p>
+    </div>
+    <div class="hero-actions">
+      <button id="open-changelog" class="secondary">Read the changelog</button>
+      <p>Notes on recent changes and updates.</p>
+    </div>
+  </header>
+
+
 
     <section class="card" aria-labelledby="labs-features">
       <div class="card-header">
@@ -367,13 +410,7 @@
       <div class="usage-updated">
         Last updated: <span id="usage-updated">never</span>
       </div>
-    </section>
-
-    <section class="card" aria-labelledby="labs-costs">
-      <div class="card-header">
-        <h2 id="labs-costs">Estimated costs</h2>
-        <span class="card-sub">Based on GPT-4o mini pricing ($0.00015 prompt / $0.0006 completion per 1K tokens).</span>
-      </div>
+      <div class="metric-title" role="heading" aria-level="3">Estimated costs</div>
       <div class="metrics">
         <div class="metric light">
           <span class="metric-label">Prompt cost</span>
@@ -391,6 +428,7 @@
           <span class="metric-hint">Prompt + completion combined.</span>
         </div>
       </div>
+      <small>Pricing uses GPT-4o mini rates ($0.00015 prompt / $0.0006 completion per 1K tokens).</small>
     </section>
 
     <section class="card" aria-labelledby="labs-api-key">
