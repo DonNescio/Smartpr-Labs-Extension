@@ -763,6 +763,8 @@ let paragraphOverlayVisible = false;
 let paragraphOverlayBusy = false;
 let paragraphOverlayInitialized = false;
 let paragraphOverlayListenersAttached = false;
+let paragraphOverlayHint = null;
+const PARAGRAPH_OVERLAY_HINT_DEFAULT = 'Draft the next lines with AI.';
 let paragraphWriterInfo = {
   blockId: null,
   blockType: '',
@@ -792,20 +794,39 @@ function ensureParagraphOverlay() {
     zIndex: '1000001',
     display: 'none',
     alignItems: 'center',
-    gap: '8px',
-    background: '#0f2c36',
-    color: '#e7f3f7',
-    padding: '10px 14px',
-    borderRadius: '12px',
-    boxShadow: '0 12px 32px rgba(7,24,33,0.18)'
+    gap: '12px',
+    background: 'linear-gradient(130deg, rgba(20,196,163,0.92), rgba(15,123,255,0.9))',
+    color: '#071821',
+    padding: '12px 16px',
+    borderRadius: '16px',
+    border: '1px solid rgba(7,24,33,0.18)',
+    boxShadow: '0 16px 32px rgba(7,24,33,0.28)',
+    backdropFilter: 'blur(10px)'
+  });
+
+  const contentWrap = document.createElement('div');
+  Object.assign(contentWrap.style, {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px'
   });
 
   const label = document.createElement('span');
   label.textContent = 'Paragraph Writer';
   Object.assign(label.style, {
     font: '600 13px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
-    letterSpacing: '0.01em'
+    letterSpacing: '0.02em',
+    textTransform: 'uppercase'
   });
+
+  const hint = document.createElement('span');
+  hint.textContent = PARAGRAPH_OVERLAY_HINT_DEFAULT;
+  Object.assign(hint.style, {
+    font: '12px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
+    color: '#032030',
+    opacity: '0.85'
+  });
+  paragraphOverlayHint = hint;
 
   const button = document.createElement('button');
   button.type = 'button';
@@ -814,15 +835,20 @@ function ensureParagraphOverlay() {
   Object.assign(button.style, {
     font: '600 13px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
     padding: '8px 12px',
-    borderRadius: '10px',
-    border: '1px solid rgba(231,243,247,0.35)',
-    background: '#14c4a3',
-    color: '#071821',
+    borderRadius: '12px',
+    border: '1px solid rgba(7,24,33,0.15)',
+    background: '#ffffff',
+    color: '#0b3544',
     cursor: 'pointer'
   });
   button.addEventListener('click', handleParagraphOverlayClick);
+  button.addEventListener('mouseenter', () => button.style.background = '#f1f5ff');
+  button.addEventListener('mouseleave', () => button.style.background = '#ffffff');
 
-  overlay.appendChild(label);
+  contentWrap.appendChild(label);
+  contentWrap.appendChild(hint);
+
+  overlay.appendChild(contentWrap);
   overlay.appendChild(button);
   document.body.appendChild(overlay);
 
@@ -909,6 +935,9 @@ function setParagraphOverlayBusy(busy) {
   paragraphOverlayButton.textContent = paragraphOverlayBusy ? 'Writing…' : '✨ Write paragraph';
   paragraphOverlayButton.style.opacity = paragraphOverlayBusy ? '0.7' : '';
   paragraphOverlayButton.style.cursor = paragraphOverlayBusy ? 'default' : 'pointer';
+  if (paragraphOverlayHint) {
+    paragraphOverlayHint.textContent = paragraphOverlayBusy ? 'Drafting your next paragraph…' : PARAGRAPH_OVERLAY_HINT_DEFAULT;
+  }
 }
 
 function refreshParagraphOverlayVisibility() {
@@ -1013,9 +1042,16 @@ async function handleParagraphOverlayClick() {
         refreshParagraphOverlayVisibility();
       }, 4000);
     } else {
+      const appliedLocally = applyParagraphFallback(html);
       setParagraphOverlayBusy(false);
-      await copyToClipboard(paragraph);
-      toast('Paragraph copied to clipboard.');
+      if (appliedLocally) {
+        paragraphWriterInfo.isEmpty = false;
+        toast('Paragraph drafted!');
+        refreshParagraphOverlayVisibility();
+      } else {
+        await copyToClipboard(paragraph);
+        toast('Paragraph copied to clipboard.');
+      }
       lastGeneratedParagraph = '';
     }
   } catch (err) {
@@ -1126,6 +1162,45 @@ function normalizeParagraphRect(rect) {
     return null;
   }
   return { top, left, width, height };
+}
+
+function applyParagraphFallback(html) {
+  const editorCandidates = [
+    document.querySelector('.content-labels--paragraph .module--selected .mce-content-body'),
+    document.querySelector('.module--selected.content-labels--paragraph .mce-content-body'),
+    document.querySelector('.mce-content-body.mce-edit-focus'),
+    document.querySelector('[data-qa="tinyeditor-root-element"].mce-content-body')
+  ].filter(Boolean);
+  const editorEl = editorCandidates.find(el => el && el.isConnected);
+  if (!editorEl) return false;
+
+  let applied = false;
+  if (typeof window !== 'undefined' && window.tinymce && typeof editorEl.id === 'string' && editorEl.id) {
+    try {
+      const instance = window.tinymce.get(editorEl.id);
+      if (instance) {
+        instance.focus();
+        instance.setContent(html);
+        instance.fire('change');
+        applied = true;
+      }
+    } catch (err) {
+      console.debug('[Smartpr Labs][ParagraphWriter] TinyMCE fallback failed', err?.message || err);
+    }
+  }
+
+  if (!applied) {
+    editorEl.innerHTML = html;
+    try {
+      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch { /* ignore */ }
+    applied = true;
+  }
+
+  if (applied) {
+    try { editorEl.focus(); } catch { /* ignore */ }
+  }
+  return applied;
 }
 
 
