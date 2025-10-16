@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Smart.pr Labs",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Smart.pr Labs – includes the Angle Assistant to suggest newsworthy story angles inside Smart.pr.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
