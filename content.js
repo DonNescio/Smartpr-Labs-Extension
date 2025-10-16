@@ -61,6 +61,7 @@ const FEATURE_KEYS = {
   angleAssistant: 'feature_angle_assistant',
   prFeedback: 'feature_pr_feedback',
   paragraphWriter: 'feature_paragraph_writer',
+  subjectGenerator: 'feature_subject_generator',
 };
 const LABS_DISABLED_KEY = 'labs_disabled';
 
@@ -68,6 +69,7 @@ const DEFAULT_FEATURE_FLAGS = {
   angleAssistant: true,
   prFeedback: true,
   paragraphWriter: true,
+  subjectGenerator: true,
 };
 
 const STORAGE_KEYS = [...Object.values(FEATURE_KEYS), LABS_DISABLED_KEY];
@@ -93,6 +95,7 @@ function loadFeatureFlags() {
         angleAssistant: normalizeFeatureValue(stored[FEATURE_KEYS.angleAssistant], DEFAULT_FEATURE_FLAGS.angleAssistant),
         prFeedback: normalizeFeatureValue(stored[FEATURE_KEYS.prFeedback], DEFAULT_FEATURE_FLAGS.prFeedback),
         paragraphWriter: normalizeFeatureValue(stored[FEATURE_KEYS.paragraphWriter], DEFAULT_FEATURE_FLAGS.paragraphWriter),
+        subjectGenerator: normalizeFeatureValue(stored[FEATURE_KEYS.subjectGenerator], DEFAULT_FEATURE_FLAGS.subjectGenerator),
       };
       featuresReady = true;
       resolve(featureFlags);
@@ -114,6 +117,7 @@ function applyFeatureUpdates(partialFlags = {}) {
   if (!featureFlags.angleAssistant) teardownAngleAssistant();
   if (!featureFlags.prFeedback) teardownPRFeedback();
   if (!featureFlags.paragraphWriter) teardownParagraphWriter();
+  if (!featureFlags.subjectGenerator) teardownSubjectGenerator();
   runInjections();
 }
 
@@ -307,8 +311,20 @@ Guidelines:
 Return plain text only — no quotation marks, markdown, bullets, or HTML.
 `;
 
+const SUBJECT_GENERATOR_SYSTEM_PROMPT = `
+You are an award-winning PR subject line strategist helping a Smart.pr user improve their mailing.
+You receive the raw HTML of the mailing plus their current subject line (if any).
 
+Write one compelling subject line that maximizes opens without sounding spammy.
 
+Rules:
+1. Detect the dominant language (Dutch or English) and write the subject in that language.
+2. Keep it <= 70 characters and factual to the mailing content.
+3. Avoid ALL CAPS, excessive punctuation, emoji, or clickbait.
+4. Highlight the strongest news hook or benefit while staying true to the story.
+
+Return JSON only in this format: {"subject":"..."} with no extra text.
+`;
 
 const BRIDGE_SCRIPT_ID = 'spr-pr-feedback-bridge';
 const BRIDGE_REQUEST = 'SPR_FEEDBACK_GET_HTML';
@@ -1256,6 +1272,232 @@ function applyParagraphFallback(html) {
 }
 
 
+// ---------- Subject Line Generator ----------
+let subjectGeneratorButton = null;
+let subjectGeneratorObserver = null;
+let subjectGeneratorInput = null;
+let subjectGeneratorContainer = null;
+let subjectGeneratorBusy = false;
+
+function mirrorSubjectGeneratorState() {
+  if (!subjectGeneratorButton || !subjectGeneratorInput) return;
+  const input = subjectGeneratorInput;
+  const baseDisabled = input.disabled
+    || input.hasAttribute('disabled')
+    || input.getAttribute('aria-disabled') === 'true';
+  const disabled = subjectGeneratorBusy || baseDisabled;
+  if (subjectGeneratorButton.disabled !== !!disabled) {
+    subjectGeneratorButton.disabled = !!disabled;
+  }
+
+  if (subjectGeneratorBusy) {
+    if (!subjectGeneratorButton.dataset.label) {
+      subjectGeneratorButton.dataset.label = subjectGeneratorButton.textContent || '✨ Generate subject';
+    }
+    if (subjectGeneratorButton.textContent !== 'Working…') {
+      subjectGeneratorButton.textContent = 'Working…';
+    }
+    if (subjectGeneratorButton.style.opacity !== '0.7') {
+      subjectGeneratorButton.style.opacity = '0.7';
+    }
+    if (subjectGeneratorButton.style.pointerEvents !== 'none') {
+      subjectGeneratorButton.style.pointerEvents = 'none';
+    }
+    return;
+  }
+
+  if (subjectGeneratorButton.dataset.label) {
+    if (subjectGeneratorButton.textContent !== subjectGeneratorButton.dataset.label) {
+      subjectGeneratorButton.textContent = subjectGeneratorButton.dataset.label;
+    }
+  }
+  const targetOpacity = baseDisabled ? '0.6' : '';
+  if (subjectGeneratorButton.style.opacity !== targetOpacity) {
+    subjectGeneratorButton.style.opacity = targetOpacity;
+  }
+  const targetPointerEvents = baseDisabled ? 'none' : '';
+  if (subjectGeneratorButton.style.pointerEvents !== targetPointerEvents) {
+    subjectGeneratorButton.style.pointerEvents = targetPointerEvents;
+  }
+}
+
+function setSubjectGeneratorBusy(busy) {
+  subjectGeneratorBusy = !!busy;
+  mirrorSubjectGeneratorState();
+}
+
+function ensureSubjectGeneratorButton() {
+  if (!featureFlags.subjectGenerator) return;
+  const field = getSubjectField();
+  if (!field) return;
+
+  subjectGeneratorInput = field;
+  const container = field.closest('.form-mailing-edit__field') || field.parentElement;
+  if (!container) return;
+  subjectGeneratorContainer = container;
+
+  let btn = container.querySelector('.spr-subject-generate-btn');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ui-button__root ui-button__root--default ui-button__root--small spr-subject-generate-btn';
+    btn.textContent = '✨ Generate subject';
+    btn.style.marginLeft = '8px';
+    btn.style.whiteSpace = 'nowrap';
+    btn.addEventListener('click', onGenerateSubjectLine);
+    btn.dataset.sprSubjectListener = '1';
+    container.appendChild(btn);
+  } else if (!btn.dataset.sprSubjectListener) {
+    btn.addEventListener('click', onGenerateSubjectLine);
+    btn.dataset.sprSubjectListener = '1';
+  }
+
+  subjectGeneratorButton = btn;
+  if (subjectGeneratorButton.style.flex !== '0 0 auto') {
+    subjectGeneratorButton.style.flex = '0 0 auto';
+  }
+  if (!subjectGeneratorButton.dataset.label) {
+    subjectGeneratorButton.dataset.label = subjectGeneratorButton.textContent || '✨ Generate subject';
+  }
+
+  if (!container.dataset.sprSubjectLayoutApplied) {
+    container.dataset.sprSubjectPrevDisplay = container.style.display || '';
+    container.dataset.sprSubjectPrevAlign = container.style.alignItems || '';
+    container.dataset.sprSubjectPrevGap = container.style.gap || '';
+    const computed = typeof window !== 'undefined' && window.getComputedStyle
+      ? window.getComputedStyle(container)
+      : null;
+    if (!computed || computed.display !== 'flex') {
+      container.style.display = 'flex';
+    }
+    if (!computed || computed.alignItems === 'stretch') {
+      container.style.alignItems = 'center';
+    }
+    if (!computed || ((computed.gap === 'normal' || computed.gap === '0px') && !(container.style.gap && container.style.gap.trim()))) {
+      container.style.gap = container.style.gap || '8px';
+    }
+    container.dataset.sprSubjectLayoutApplied = '1';
+  }
+
+  if (!field.dataset.sprSubjectFlexApplied) {
+    field.dataset.sprSubjectPrevFlex = field.style.flex || '';
+    if (!(field.style.flex && field.style.flex.trim())) {
+      field.style.flex = '1 1 auto';
+    }
+    field.dataset.sprSubjectFlexApplied = '1';
+  }
+
+  if (subjectGeneratorObserver) {
+    try { subjectGeneratorObserver.disconnect(); } catch { /* ignore */ }
+  }
+  subjectGeneratorObserver = new MutationObserver(mirrorSubjectGeneratorState);
+  subjectGeneratorObserver.observe(field, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
+
+  mirrorSubjectGeneratorState();
+}
+
+async function onGenerateSubjectLine() {
+  if (!featureFlags.subjectGenerator) return;
+
+  const field = (subjectGeneratorInput && document.contains(subjectGeneratorInput))
+    ? subjectGeneratorInput
+    : getSubjectField();
+  if (!field) {
+    toast('Subject field not found.');
+    return;
+  }
+  subjectGeneratorInput = field;
+
+  setSubjectGeneratorBusy(true);
+
+  let mailingHTML = '';
+  try {
+    mailingHTML = await collectMailingHTML();
+  } catch {
+    mailingHTML = '';
+  }
+  if (!mailingHTML) {
+    toast('Could not capture the mailing content. Using available details only.');
+  }
+  const MAX_MAILING_CHARS = 20000;
+  let trimmedMailingHTML = mailingHTML;
+  let truncationNote = '';
+  if (trimmedMailingHTML && trimmedMailingHTML.length > MAX_MAILING_CHARS) {
+    trimmedMailingHTML = trimmedMailingHTML.slice(0, MAX_MAILING_CHARS);
+    truncationNote = `\n\nNote: Mailing HTML truncated to first ${MAX_MAILING_CHARS} characters.`;
+  }
+
+  let apiKey;
+  try {
+    apiKey = await getApiKey();
+  } catch {
+    setSubjectGeneratorBusy(false);
+    return;
+  }
+
+  const currentSubject = field.value.trim();
+  const userPrompt = `Current subject line: ${currentSubject || '(none provided yet)'}\n\nMailing HTML:\n${trimmedMailingHTML || '(not available)'}${truncationNote}`;
+
+  try {
+    const response = await openAIChat(apiKey, SUBJECT_GENERATOR_SYSTEM_PROMPT, userPrompt, 0.5);
+    let suggestion = '';
+    const parsed = safeParseJSON(response);
+    if (parsed && typeof parsed.subject === 'string') {
+      suggestion = parsed.subject.trim();
+    }
+    if (!suggestion) {
+      suggestion = (response || '').trim().replace(/^[\s"'`]+|[\s"'`]+$/g, '');
+    }
+    if (!suggestion) {
+      toast('ChatGPT did not return a subject line.');
+      return;
+    }
+
+    field.value = suggestion;
+    try { field.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* ignore */ }
+    try { field.dispatchEvent(new Event('change', { bubbles: true })); } catch { /* ignore */ }
+    toast('Subject updated.');
+  } catch (err) {
+    console.error('[Smartpr Labs][SubjectGenerator] Failed to generate subject', err);
+    toast(getOpenAIErrorMessage(err, 'Could not generate a subject line. Please try again.'));
+  } finally {
+    setSubjectGeneratorBusy(false);
+  }
+}
+
+function teardownSubjectGenerator() {
+  subjectGeneratorBusy = false;
+  if (subjectGeneratorObserver) {
+    try { subjectGeneratorObserver.disconnect(); } catch { /* ignore */ }
+    subjectGeneratorObserver = null;
+  }
+  if (subjectGeneratorButton) {
+    try { subjectGeneratorButton.remove(); } catch { /* ignore */ }
+    subjectGeneratorButton = null;
+  }
+  if (subjectGeneratorInput) {
+    if (subjectGeneratorInput.dataset.sprSubjectFlexApplied) {
+      subjectGeneratorInput.style.flex = subjectGeneratorInput.dataset.sprSubjectPrevFlex || '';
+      delete subjectGeneratorInput.dataset.sprSubjectPrevFlex;
+      delete subjectGeneratorInput.dataset.sprSubjectFlexApplied;
+    }
+    subjectGeneratorInput = null;
+  }
+  if (subjectGeneratorContainer) {
+    if (subjectGeneratorContainer.dataset.sprSubjectLayoutApplied) {
+      subjectGeneratorContainer.style.display = subjectGeneratorContainer.dataset.sprSubjectPrevDisplay || '';
+      subjectGeneratorContainer.style.alignItems = subjectGeneratorContainer.dataset.sprSubjectPrevAlign || '';
+      subjectGeneratorContainer.style.gap = subjectGeneratorContainer.dataset.sprSubjectPrevGap || '';
+      delete subjectGeneratorContainer.dataset.sprSubjectPrevDisplay;
+      delete subjectGeneratorContainer.dataset.sprSubjectPrevAlign;
+      delete subjectGeneratorContainer.dataset.sprSubjectPrevGap;
+      delete subjectGeneratorContainer.dataset.sprSubjectLayoutApplied;
+    }
+    subjectGeneratorContainer = null;
+  }
+}
+
+
 // ---------- PR Feedback Assistant ----------
 function ensurePRFeedbackPanel() {
   if (!document.body) return null;
@@ -1492,6 +1734,7 @@ function teardownAllFeatures() {
   teardownAngleAssistant();
   teardownPRFeedback();
   teardownParagraphWriter();
+  teardownSubjectGenerator();
 }
 
 // Initial injection & observe SPA updates
@@ -1507,6 +1750,12 @@ function runInjections() {
     ensureInjected();
   } else {
     teardownAngleAssistant();
+  }
+
+  if (featureFlags.subjectGenerator) {
+    ensureSubjectGeneratorButton();
+  } else {
+    teardownSubjectGenerator();
   }
 
   if (featureFlags.prFeedback) {
@@ -1547,6 +1796,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (FEATURE_KEYS.paragraphWriter in changes) {
     updates.paragraphWriter = normalizeFeatureValue(changes[FEATURE_KEYS.paragraphWriter].newValue, DEFAULT_FEATURE_FLAGS.paragraphWriter);
+  }
+  if (FEATURE_KEYS.subjectGenerator in changes) {
+    updates.subjectGenerator = normalizeFeatureValue(changes[FEATURE_KEYS.subjectGenerator].newValue, DEFAULT_FEATURE_FLAGS.subjectGenerator);
   }
   if (LABS_DISABLED_KEY in changes) {
     const nextDisabled = Boolean(changes[LABS_DISABLED_KEY].newValue);

@@ -12,12 +12,14 @@ const FEATURE_KEYS = {
   angleAssistant: 'feature_angle_assistant',
   prFeedback: 'feature_pr_feedback',
   paragraphWriter: 'feature_paragraph_writer',
+  subjectGenerator: 'feature_subject_generator',
 };
 
 const DEFAULT_FEATURE_STATE = {
   angleAssistant: true,
   prFeedback: true,
   paragraphWriter: true,
+  subjectGenerator: true,
 };
 
 let featureState = { ...DEFAULT_FEATURE_STATE };
@@ -40,12 +42,14 @@ const featureButtons = {
   angleAssistant: $('#toggle-angle'),
   prFeedback: $('#toggle-feedback'),
   paragraphWriter: $('#toggle-paragraph'),
+  subjectGenerator: $('#toggle-subject'),
 };
 
 const featureStatus = {
   angleAssistant: $('#status-angle'),
   prFeedback: $('#status-feedback'),
   paragraphWriter: $('#status-paragraph'),
+  subjectGenerator: $('#status-subject'),
 };
 
 const RATE_PROMPT = 0.00015; // USD per 1K tokens
@@ -152,6 +156,7 @@ function loadFeatures() {
       angleAssistant: normalizeFeatureValue(stored[FEATURE_KEYS.angleAssistant], DEFAULT_FEATURE_STATE.angleAssistant),
       prFeedback: normalizeFeatureValue(stored[FEATURE_KEYS.prFeedback], DEFAULT_FEATURE_STATE.prFeedback),
       paragraphWriter: normalizeFeatureValue(stored[FEATURE_KEYS.paragraphWriter], DEFAULT_FEATURE_STATE.paragraphWriter),
+      subjectGenerator: normalizeFeatureValue(stored[FEATURE_KEYS.subjectGenerator], DEFAULT_FEATURE_STATE.subjectGenerator),
     };
     updateFeatureUI();
   });
