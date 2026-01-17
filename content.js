@@ -1,10 +1,7 @@
-/* content.js — Smart.pr Labs: Angle Assistant (MV3)
- * - Injects a "Generate angles" button next to Smart.pr "Create content"
- * - Mirrors disabled state of the native Create content button
- * - Modal with Subject (prefilled), optional Short description
- * - Generate concise angles (1-sentence perspectives)
- * - Press release generator from any generated angle
- * - Uses chrome.storage.sync for OpenAI key (set in options page)
+/* content.js — Smart.pr Labs Helper (MV3)
+ * - Floating helper icon on *.smart.pr
+ * - Nudges when subject line is filled
+ * - Offers ChatGPT suggestions without injecting into page fields
  */
 
 // ---------- Utilities ----------
@@ -25,6 +22,7 @@ function deepQuerySelectorAll(selector, roots = [document]) {
       let matches = [];
       try { matches = root.querySelectorAll(selector); } catch { matches = []; }
       matches.forEach(el => results.add(el));
+
       let frames = [];
       try { frames = root.querySelectorAll('iframe'); } catch { frames = []; }
       frames.forEach(frame => {
@@ -74,13 +72,6 @@ const DEFAULT_FEATURE_FLAGS = {
 
 const STORAGE_KEYS = [...Object.values(FEATURE_KEYS), LABS_DISABLED_KEY];
 
-const PARAGRAPH_PLACEHOLDER_TEXT = "I'm a new paragraph block.";
-const BEE_FRAME_ORIGIN = 'https://app.getbee.io';
-const PARAGRAPH_STATUS_EVENT = 'SPR_PARAGRAPH_STATUS';
-const PARAGRAPH_FRAME_STATUS_EVENT = 'SPR_PARAGRAPH_FRAME_STATUS';
-const PARAGRAPH_APPLY_EVENT = 'SPR_PARAGRAPH_APPLY';
-const PARAGRAPH_APPLY_RESULT_EVENT = 'SPR_PARAGRAPH_APPLY_RESULT';
-
 let featureFlags = { ...DEFAULT_FEATURE_FLAGS };
 let featuresReady = false;
 let extensionDisabled = false;
@@ -103,25 +94,12 @@ function loadFeatureFlags() {
   });
 }
 
-function applyFeatureUpdates(partialFlags = {}) {
-  let changed = false;
-  const next = { ...featureFlags };
-  for (const key of Object.keys(partialFlags)) {
-    if (key in next && partialFlags[key] !== undefined && next[key] !== partialFlags[key]) {
-      next[key] = partialFlags[key];
-      changed = true;
-    }
-  }
-  if (!changed) return;
-  featureFlags = next;
-  if (!featureFlags.angleAssistant) teardownAngleAssistant();
-  if (!featureFlags.prFeedback) teardownPRFeedback();
-  if (!featureFlags.paragraphWriter) teardownParagraphWriter();
-  if (!featureFlags.subjectGenerator) teardownSubjectGenerator();
-  runInjections();
+function anyFeatureEnabled() {
+  return Object.values(featureFlags).some(Boolean);
 }
 
 const USAGE_KEY = 'sase_usage';
+const NUDGE_HISTORY_KEY = 'sase_nudge_history';
 
 async function recordUsage(usage = {}) {
   try {
@@ -148,12 +126,18 @@ async function recordUsage(usage = {}) {
 function escapeHTML(s) {
   return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-function escapeAttr(s) {
-  return escapeHTML(s).replace(/\n/g, ' ');
-}
+
 function safeParseJSON(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
+
+function extractJSON(str) {
+  if (!str) return null;
+  const match = str.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  return safeParseJSON(match[0]);
+}
+
 async function copyToClipboard(text) {
   try { await navigator.clipboard.writeText(text); }
   catch {
@@ -162,6 +146,7 @@ async function copyToClipboard(text) {
     document.execCommand('copy'); ta.remove();
   }
 }
+
 function toast(msg) {
   const el = document.createElement('div');
   el.textContent = msg;
@@ -176,12 +161,7 @@ function toast(msg) {
 }
 
 function getSubjectField() {
-  // Common selectors for the Subject input on the Smart.pr form
   return $('input[placeholder="Please type your subject"], input[name="subject"], input[aria-label="Subject"]');
-}
-
-function getSenderField() {
-  return $('input[name="sender__label"], input[name="sender_label"], input[aria-label="Sender"], input[placeholder="Search sender..."]');
 }
 
 // ---------- API key handling ----------
@@ -262,35 +242,50 @@ function getOpenAIErrorMessage(err, fallback = 'Something went wrong. Please try
   return fallback;
 }
 
+// ---------- Prompts ----------
+const SUBJECT_SUGGESTIONS_SYSTEM_PROMPT = `
+You are an award-winning PR subject line strategist helping a Smart.pr user improve their mailing.
+You receive the raw HTML of the mailing plus their current subject line (if any).
+
+Write 3 to 5 compelling subject line alternatives that maximize opens without sounding spammy.
+
+Rules:
+1. Detect the dominant language (Dutch or English) and write the subjects in that language.
+2. Keep each subject <= 70 characters and factual to the mailing content.
+3. Avoid ALL CAPS, excessive punctuation, emoji, or clickbait.
+4. Highlight the strongest news hook or benefit while staying true to the story.
+
+Return JSON only in this format: {"subjects":["...", "...", "..."]} with no extra text.
+`;
+
+const ANGLE_SYSTEM_PROMPT = `You are a senior PR strategist. Produce concise, one-sentence "angles" (perspectives) on the topic.
+Return JSON only: {"angles":[ "...", "...", ... ]} with 1-5 items (never more than five). Each item <= 30 words, crisp, distinct.
+Determine the dominant language of the subject line and write every angle in that language. Do not translate into English unless the subject itself is in English.`;
+
 const PR_FEEDBACK_SYSTEM_PROMPT = `
-Act as a **senior PR editor and email deliverability coach**.
+Act as a senior PR editor and email deliverability coach.
 You receive raw HTML of a press-release mailing.
 
 Your job: deliver clear, concise editorial feedback that helps the sender make their mailing more professional, engaging, and correct.
 
-### Review checklist
+Review checklist
 1. Strip all HTML and read only the text.
-2. Detect the dominant language (Dutch or English) and respond **entirely in that language**, including all headings.
+2. Detect the dominant language (Dutch or English) and respond entirely in that language, including all headings.
 3. Evaluate:
    - Clarity and structure
    - Tone and storytelling
    - Grammar, spelling, and punctuation (list specific typos if any)
    - Readability and sentence flow
-   - Call-to-action clarity **(ignore standard unsubscribe links added automatically by email software)**
+   - Call-to-action clarity (ignore standard unsubscribe links added automatically by email software)
 
-### Write your response in plain text with the following three sections, using headings in the same language as the text:
-**Sterktes** (if Dutch) / **Strengths** (if English)  
-Summarize 3–5 clear positives (e.g. human quotes, news angle, tone, flow).
+Write your response in plain text with the following three sections, using headings in the same language as the text:
+Strengths (or Sterktes if Dutch)
+Areas for improvement (or Verbeterpunten if Dutch)
+Action plan (or Aanpak if Dutch)
 
-**Verbeterpunten** (if Dutch) / **Areas for improvement** (if English)  
-Point out concrete issues — including grammar or spelling errors — and explain briefly why they matter.
-
-**Aanpak** (if Dutch) / **Action plan** (if English)  
-List practical next steps or short rewrite examples showing how to fix the problems. Use bullet points or short paragraphs, not code blocks or Markdown symbols.
-
-### Style guidelines
+Style guidelines
 - Be professional, pragmatic, and concise.
-- Avoid Markdown syntax like #, ####, or triple backticks.
+- Avoid Markdown syntax like # or backticks.
 - Never restate the whole text; focus only on insights.
 - Do not include raw HTML.
 `;
@@ -305,44 +300,960 @@ Guidelines:
 1. Strip all HTML and read only the text.
 2. Detect the dominant language (Dutch or English) and respond entirely in that language.
 3. Match the existing tone, voice, and level of formality.
-4. Provide exactly one new paragraph (2–4 sentences) that adds new information, insight, or value.
+4. Provide exactly one new paragraph (2-4 sentences) that adds new information, insight, or value.
 5. Avoid repeating existing sentences, avoid greetings or farewells, and do not include unsubscribe or legal boilerplate.
 
-Return plain text only — no quotation marks, markdown, bullets, or HTML.
+Return plain text only.
 `;
 
-const SUBJECT_GENERATOR_SYSTEM_PROMPT = `
-You are an award-winning PR subject line strategist helping a Smart.pr user improve their mailing.
-You receive the raw HTML of the mailing plus their current subject line (if any).
-
-Write one compelling subject line that maximizes opens without sounding spammy.
-
-Rules:
-1. Detect the dominant language (Dutch or English) and write the subject in that language.
-2. Keep it <= 70 characters and factual to the mailing content.
-3. Avoid ALL CAPS, excessive punctuation, emoji, or clickbait.
-4. Highlight the strongest news hook or benefit while staying true to the story.
-
-Return JSON only in this format: {"subject":"..."} with no extra text.
-`;
-
+// ---------- Bridge / Bee HTML collection ----------
 const BRIDGE_SCRIPT_ID = 'spr-pr-feedback-bridge';
 const BRIDGE_REQUEST = 'SPR_FEEDBACK_GET_HTML';
 const BRIDGE_RESPONSE = 'SPR_FEEDBACK_HTML';
 const BRIDGE_READY = 'SPR_FEEDBACK_BRIDGE_READY';
 const BRIDGE_PING = 'SPR_FEEDBACK_BRIDGE_PING';
+const PARAGRAPH_STATUS_EVENT = 'SPR_PARAGRAPH_STATUS';
+const PARAGRAPH_FRAME_STATUS_EVENT = 'SPR_PARAGRAPH_FRAME_STATUS';
 
 let bridgeReady = false;
 let bridgeReadyWaiters = [];
 const bridgeHtmlRequests = new Map();
-let lastFeedbackInput = '';
-let inputModal = null;
 
-function logFeedback(...args) {
+function injectBeeBridge() {
+  if (document.getElementById(BRIDGE_SCRIPT_ID)) return;
+  const script = document.createElement('script');
+  script.id = BRIDGE_SCRIPT_ID;
+  script.src = chrome.runtime.getURL('page-bridge.js');
+  script.async = false;
+  script.onload = () => {
+    setTimeout(() => {
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }, 0);
+  };
+  (document.head || document.documentElement).appendChild(script);
+}
+
+function waitForBridgeReady(timeout = 6000) {
+  if (bridgeReady) return Promise.resolve(true);
+  injectBeeBridge();
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      bridgeReadyWaiters = bridgeReadyWaiters.filter(fn => fn !== onReady);
+      resolve(false);
+    }, timeout);
+    const onReady = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      bridgeReadyWaiters = bridgeReadyWaiters.filter(fn => fn !== onReady);
+      resolve(true);
+    };
+    bridgeReadyWaiters.push(onReady);
+    try { window.postMessage({ type: BRIDGE_PING }, '*'); } catch { /* ignore */ }
+  });
+}
+
+async function requestBeeHtmlViaBridge(timeout = 6000) {
+  injectBeeBridge();
+  await waitForBridgeReady(timeout);
+
+  const id = `spr-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      bridgeHtmlRequests.delete(id);
+      resolve('');
+    }, timeout);
+    bridgeHtmlRequests.set(id, { resolve, timeout: timer });
+    try {
+      window.postMessage({ type: BRIDGE_REQUEST, id }, '*');
+    } catch {
+      clearTimeout(timer);
+      bridgeHtmlRequests.delete(id);
+      resolve('');
+    }
+  });
+}
+
+const MAILING_PRIMARY_SELECTOR = '.publisher-mailing-html__root';
+const MAILING_SECONDARY_SELECTORS = [
+  '.publisher-mailings-design-bee__body',
+  '[mailing-id-selector="publisherMailingIdSelector"]',
+  '.mailing-html__iframe',
+  'publisher-mailing-html',
+  'div.stageContent',
+  'div.Stage_stageInner__M9-ST',
+  'div.Stage_stageInner',
+  'div.stageInner',
+  '.stageInner',
+  '.Stage_stageInner__M9-ST'
+];
+const MAILING_PRESENCE_SELECTOR = [MAILING_PRIMARY_SELECTOR, ...MAILING_SECONDARY_SELECTORS].join(', ');
+
+async function collectMailingHTML() {
+  const secondarySelectors = MAILING_SECONDARY_SELECTORS;
+
+  const beeHtml = await requestBeeHtmlViaBridge();
+  if (beeHtml) return beeHtml;
+
+  const primaryNodes = deepQuerySelectorAll(MAILING_PRIMARY_SELECTOR).filter(Boolean);
+  if (primaryNodes.length) {
+    const htmlChunks = primaryNodes
+      .map(node => (node.outerHTML || '').trim())
+      .filter(Boolean);
+    if (htmlChunks.length) return htmlChunks.join('\n\n');
+  }
+
+  for (const selector of secondarySelectors) {
+    const candidates = deepQuerySelectorAll(selector).filter(Boolean);
+    if (candidates.length) {
+      const htmlChunks = candidates
+        .map(node => (node.outerHTML || '').trim())
+        .filter(Boolean);
+      if (htmlChunks.length) return htmlChunks.join('\n\n');
+    }
+  }
+
+  return '';
+}
+
+function detectMailingPresence() {
   try {
-    console.debug('[Smartpr Labs][Feedback]', ...args);
+    if (document.querySelector(MAILING_PRESENCE_SELECTOR)) return true;
+    return deepQuerySelectorAll(MAILING_PRESENCE_SELECTOR).length > 0;
   } catch {
-    // ignore logging errors
+    return false;
+  }
+}
+
+function scheduleMailingCheck() {
+  if (helperState.mailingCheckTimer || helperState.mailingCheckInFlight) return;
+  helperState.mailingCheckTimer = setTimeout(async () => {
+    helperState.mailingCheckTimer = null;
+    helperState.mailingCheckInFlight = true;
+    let ready = detectMailingPresence();
+    if (!ready) {
+      try { ready = !!(await requestBeeHtmlViaBridge(1500)); } catch { ready = false; }
+    }
+    helperState.mailingCheckInFlight = false;
+    if (helperState.mailingReady !== ready) {
+      helperState.mailingReady = ready;
+      updateCardStatuses();
+      refreshHelperUI();
+    }
+  }, 300);
+}
+
+// ---------- Paragraph status ----------
+let paragraphWriterInfo = {
+  isEmpty: false,
+  isText: false,
+};
+
+function updateParagraphEligibility(nextInfo) {
+  paragraphWriterInfo = { ...paragraphWriterInfo, ...nextInfo };
+  helperState.paragraphEligible = !!(paragraphWriterInfo.isText && paragraphWriterInfo.isEmpty);
+  updateCardStatuses();
+  refreshHelperUI();
+}
+
+function normalizeParagraphRect(rect) {
+  if (!rect || typeof rect !== 'object') return null;
+  const top = Number(rect.top);
+  const left = Number(rect.left);
+  const width = Number(rect.width);
+  const height = Number(rect.height);
+  if (!Number.isFinite(top) || !Number.isFinite(left) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  return { top, left, width, height };
+}
+
+function isTextualBlockType(type) {
+  if (!type || typeof type !== 'string') return false;
+  return /text|paragraph|body|copy|content/i.test(type);
+}
+
+function onParagraphStatus(payload) {
+  if (!featureFlags.paragraphWriter) return;
+  const status = payload?.status && typeof payload.status === 'object' ? payload.status : payload;
+  if (!status || typeof status !== 'object') return;
+  const blockType = status.blockType || status.type || '';
+  const isText = status.isText !== undefined ? !!status.isText : isTextualBlockType(blockType);
+  updateParagraphEligibility({
+    isEmpty: !!status.isEmpty,
+    isText,
+    rect: normalizeParagraphRect(status.rect) || null,
+  });
+}
+
+function onParagraphFrameStatus(payload) {
+  if (!featureFlags.paragraphWriter || !payload || typeof payload !== 'object') return;
+  updateParagraphEligibility({
+    isEmpty: !!payload.isEmpty,
+    isText: true,
+    rect: normalizeParagraphRect(payload.rect) || null,
+  });
+}
+
+function handleBridgeMessage(event) {
+  if (!event || !event.data || typeof event.data !== 'object') return;
+  const { type, html, id } = event.data;
+  if (!type) return;
+
+  if (event.source === window) {
+    if (type === BRIDGE_READY) {
+      bridgeReady = true;
+      const waiters = bridgeReadyWaiters.slice();
+      bridgeReadyWaiters = [];
+      waiters.forEach(fn => { try { fn(); } catch { /* ignore */ } });
+    } else if (type === BRIDGE_RESPONSE && id) {
+      const pending = bridgeHtmlRequests.get(id);
+      if (!pending) return;
+      bridgeHtmlRequests.delete(id);
+      clearTimeout(pending.timeout);
+      pending.resolve(typeof html === 'string' ? html.trim() : '');
+    } else if (type === PARAGRAPH_STATUS_EVENT) {
+      onParagraphStatus(event.data);
+    }
+  } else if (typeof event.origin === 'string' && event.origin.includes('app.getbee.io')) {
+    if (type === PARAGRAPH_FRAME_STATUS_EVENT) {
+      onParagraphFrameStatus(event.data);
+    }
+  }
+}
+
+if (!window.__sprHelperBridgeListenerAttached) {
+  window.addEventListener('message', handleBridgeMessage, false);
+  window.__sprHelperBridgeListenerAttached = true;
+}
+
+// ---------- Helper UI ----------
+const helperState = {
+  subject: '',
+  panelOpen: false,
+  nudgeId: '',
+  nudgeDismissedUntil: 0,
+  lastNudgedSubject: '',
+  nudgeTimer: null,
+  nudgePendingText: '',
+  nudgePhase: 'idle',
+  nudgeSubject: '',
+  activeContext: '',
+  nudgeHistory: {},
+  mailingId: '',
+  lastPath: '',
+  paragraphEligible: false,
+  mailingReady: false,
+  mailingCheckTimer: null,
+  mailingCheckInFlight: false,
+  results: {
+    subject: [],
+    angles: [],
+    feedback: '',
+    paragraph: '',
+  },
+  busy: {
+    subject: false,
+    angles: false,
+    feedback: false,
+    paragraph: false,
+  },
+  lastAutoSubject: '',
+};
+
+const helperEls = {
+  root: null,
+  button: null,
+  bubbles: null,
+  bubble: null,
+  bubbleThinking: null,
+  bubbleIdeas: null,
+  bubbleText: null,
+  bubbleDismiss: null,
+  panel: null,
+  close: null,
+  emptyState: null,
+  cards: {},
+};
+
+function ensureHelperShell() {
+  if (helperEls.root && document.body.contains(helperEls.root)) return helperEls.root;
+  if (!document.body) return null;
+
+  const root = document.createElement('div');
+  root.id = 'spr-helper';
+  root.innerHTML = `
+    <button type="button" class="spr-helper-button" id="spr-helper-button" aria-label="Open helper">
+      <span class="spr-helper-pulse" aria-hidden="true"></span>
+      <img class="spr-helper-icon" alt="Smartpr helper" />
+    </button>
+    <div class="spr-helper-bubbles" id="spr-helper-bubbles" aria-live="polite">
+      <div class="spr-helper-bubble" id="spr-helper-bubble" role="button" tabindex="0">
+        <span class="spr-helper-bubble-text" id="spr-helper-bubble-text"></span>
+        <button type="button" class="spr-helper-bubble-dismiss" id="spr-helper-bubble-dismiss" aria-label="Dismiss">x</button>
+      </div>
+      <div class="spr-helper-bubble is-muted" id="spr-helper-bubble-thinking">
+        <span class="spr-helper-bubble-text">Thinking...</span>
+      </div>
+      <button type="button" class="spr-helper-bubble is-action" id="spr-helper-bubble-ideas">
+        <span class="spr-helper-bubble-text">Click to see my ideas</span>
+      </button>
+    </div>
+    <div class="spr-helper-panel" id="spr-helper-panel" aria-hidden="true">
+      <div class="spr-helper-panel-header">
+        <div>
+          <div class="spr-helper-panel-title">Smart.pr Helper</div>
+          <div class="spr-helper-panel-subtitle">Quiet until needed</div>
+        </div>
+        <button type="button" class="spr-helper-icon-button" id="spr-helper-close" aria-label="Close">x</button>
+      </div>
+      <div class="spr-helper-panel-body">
+        <div class="spr-helper-empty-state" id="spr-helper-empty-state">
+          Nothing to help with yet. Add a subject line or open a mailing.
+        </div>
+        <div class="spr-helper-card" data-card="subject">
+          <div class="spr-helper-card-header">
+            <div>
+              <div class="spr-helper-card-title">Subject suggestions</div>
+              <div class="spr-helper-card-status" id="spr-helper-subject-status">Waiting for subject line</div>
+            </div>
+            <button type="button" class="spr-helper-btn" data-action="subject-generate">Generate</button>
+          </div>
+          <div class="spr-helper-card-body" id="spr-helper-subject-body"></div>
+        </div>
+        <div class="spr-helper-card" data-card="angles">
+          <div class="spr-helper-card-header">
+            <div>
+              <div class="spr-helper-card-title">Angle ideas</div>
+              <div class="spr-helper-card-status" id="spr-helper-angles-status">Waiting for subject line</div>
+            </div>
+            <button type="button" class="spr-helper-btn" data-action="angles-generate">Generate</button>
+          </div>
+          <div class="spr-helper-card-body" id="spr-helper-angles-body"></div>
+        </div>
+        <div class="spr-helper-card" data-card="feedback">
+          <div class="spr-helper-card-header">
+            <div>
+              <div class="spr-helper-card-title">PR feedback</div>
+              <div class="spr-helper-card-status" id="spr-helper-feedback-status">Open a mailing to enable</div>
+            </div>
+            <button type="button" class="spr-helper-btn" data-action="feedback-generate">Generate</button>
+          </div>
+          <div class="spr-helper-card-body" id="spr-helper-feedback-body"></div>
+          <div class="spr-helper-card-footer">
+            <button type="button" class="spr-helper-btn secondary" data-action="feedback-copy" style="display:none">Copy</button>
+          </div>
+        </div>
+        <div class="spr-helper-card" data-card="paragraph">
+          <div class="spr-helper-card-header">
+            <div>
+              <div class="spr-helper-card-title">Paragraph draft</div>
+              <div class="spr-helper-card-status" id="spr-helper-paragraph-status">Place cursor in empty paragraph</div>
+            </div>
+            <button type="button" class="spr-helper-btn" data-action="paragraph-generate">Generate</button>
+          </div>
+          <div class="spr-helper-card-body" id="spr-helper-paragraph-body"></div>
+          <div class="spr-helper-card-footer">
+            <button type="button" class="spr-helper-btn secondary" data-action="paragraph-copy" style="display:none">Copy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(root);
+
+  helperEls.root = root;
+  helperEls.button = $('#spr-helper-button', root);
+  helperEls.bubbles = $('#spr-helper-bubbles', root);
+  helperEls.bubble = $('#spr-helper-bubble', root);
+  helperEls.bubbleThinking = $('#spr-helper-bubble-thinking', root);
+  helperEls.bubbleIdeas = $('#spr-helper-bubble-ideas', root);
+  helperEls.bubbleText = $('#spr-helper-bubble-text', root);
+  helperEls.bubbleDismiss = $('#spr-helper-bubble-dismiss', root);
+  helperEls.panel = $('#spr-helper-panel', root);
+  helperEls.close = $('#spr-helper-close', root);
+  helperEls.emptyState = $('#spr-helper-empty-state', root);
+
+  const icon = root.querySelector('.spr-helper-icon');
+  if (icon) icon.src = chrome.runtime.getURL('icon.png');
+
+  helperEls.cards = {
+    subject: {
+      card: root.querySelector('[data-card="subject"]'),
+      status: $('#spr-helper-subject-status', root),
+      body: $('#spr-helper-subject-body', root),
+      generate: root.querySelector('[data-action="subject-generate"]'),
+    },
+    angles: {
+      card: root.querySelector('[data-card="angles"]'),
+      status: $('#spr-helper-angles-status', root),
+      body: $('#spr-helper-angles-body', root),
+      generate: root.querySelector('[data-action="angles-generate"]'),
+    },
+    feedback: {
+      card: root.querySelector('[data-card="feedback"]'),
+      status: $('#spr-helper-feedback-status', root),
+      body: $('#spr-helper-feedback-body', root),
+      generate: root.querySelector('[data-action="feedback-generate"]'),
+      copy: root.querySelector('[data-action="feedback-copy"]'),
+    },
+    paragraph: {
+      card: root.querySelector('[data-card="paragraph"]'),
+      status: $('#spr-helper-paragraph-status', root),
+      body: $('#spr-helper-paragraph-body', root),
+      generate: root.querySelector('[data-action="paragraph-generate"]'),
+      copy: root.querySelector('[data-action="paragraph-copy"]'),
+    },
+  };
+
+  bindHelperEvents();
+  return root;
+}
+
+function bindHelperEvents() {
+  if (!helperEls.root) return;
+
+  if (helperEls.button) {
+    helperEls.button.addEventListener('click', () => {
+      if (helperState.panelOpen) closeHelperPanel();
+      else openHelperPanel({ autoGenerate: 'subject' });
+    });
+  }
+
+  if (helperEls.close) {
+    helperEls.close.addEventListener('click', closeHelperPanel);
+  }
+
+  if (helperEls.bubble) {
+    helperEls.bubble.addEventListener('click', () => startNudgeFlow());
+    helperEls.bubble.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        startNudgeFlow();
+      }
+    });
+  }
+
+  if (helperEls.bubbleIdeas) {
+    helperEls.bubbleIdeas.addEventListener('click', () => {
+      recordNudgeUsed('subject');
+      openHelperPanel({ context: 'subject' });
+    });
+  }
+
+  if (helperEls.bubbleDismiss) {
+    helperEls.bubbleDismiss.addEventListener('click', (event) => {
+      event.stopPropagation();
+      dismissNudge();
+    });
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && helperState.panelOpen) {
+      closeHelperPanel();
+    }
+  });
+
+  if (helperEls.cards.subject.generate) {
+    helperEls.cards.subject.generate.addEventListener('click', () => {
+      helperState.activeContext = 'subject';
+      generateSubjectSuggestions(false);
+    });
+  }
+  if (helperEls.cards.angles.generate) {
+    helperEls.cards.angles.generate.addEventListener('click', () => {
+      helperState.activeContext = 'angles';
+      generateAngles(false);
+    });
+  }
+  if (helperEls.cards.feedback.generate) {
+    helperEls.cards.feedback.generate.addEventListener('click', () => {
+      helperState.activeContext = 'feedback';
+      requestPRFeedback(false);
+    });
+  }
+  if (helperEls.cards.paragraph.generate) {
+    helperEls.cards.paragraph.generate.addEventListener('click', () => {
+      helperState.activeContext = 'paragraph';
+      generateParagraph(false);
+    });
+  }
+  if (helperEls.cards.feedback.copy) {
+    helperEls.cards.feedback.copy.addEventListener('click', async () => {
+      if (!helperState.results.feedback) return;
+      await copyToClipboard(helperState.results.feedback);
+      toast('Feedback copied.');
+    });
+  }
+  if (helperEls.cards.paragraph.copy) {
+    helperEls.cards.paragraph.copy.addEventListener('click', async () => {
+      if (!helperState.results.paragraph) return;
+      await copyToClipboard(helperState.results.paragraph);
+      toast('Paragraph copied.');
+    });
+  }
+}
+
+function openHelperPanel(options = {}) {
+  if (!ensureHelperShell()) return;
+  const nextContext = options.context || chooseHelperContext();
+  helperState.activeContext = nextContext;
+  helperState.panelOpen = true;
+  helperEls.panel.style.display = 'flex';
+  helperEls.panel.setAttribute('aria-hidden', 'false');
+  helperEls.root.classList.add('is-open');
+  hideNudge();
+  scheduleMailingCheck();
+  refreshHelperUI();
+
+  if (options.autoGenerate === 'subject') {
+    maybeAutoGenerateSubject();
+  }
+}
+
+function closeHelperPanel() {
+  if (!helperEls.panel) return;
+  helperState.panelOpen = false;
+  helperEls.panel.style.display = 'none';
+  helperEls.panel.setAttribute('aria-hidden', 'true');
+  helperEls.root.classList.remove('is-open');
+  maybeShowNudge();
+}
+
+function chooseHelperContext() {
+  if (featureFlags.subjectGenerator && helperState.subject) return 'subject';
+  if (featureFlags.angleAssistant && helperState.subject) return 'angles';
+  if (featureFlags.paragraphWriter && helperState.paragraphEligible) return 'paragraph';
+  if (featureFlags.prFeedback && helperState.mailingReady) return 'feedback';
+  return '';
+}
+
+function setCardVisibility(cardKey, visible) {
+  const card = helperEls.cards[cardKey]?.card;
+  if (!card) return;
+  card.style.display = visible ? '' : 'none';
+}
+
+function setCardStatus(cardKey, message) {
+  const node = helperEls.cards[cardKey]?.status;
+  if (node) node.textContent = message;
+}
+
+function setCardBody(cardKey, contentNode) {
+  const body = helperEls.cards[cardKey]?.body;
+  if (!body) return;
+  body.innerHTML = '';
+  if (contentNode) body.appendChild(contentNode);
+}
+
+function renderListItems(items, label) {
+  const wrap = document.createElement('div');
+  wrap.className = 'spr-helper-list';
+
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'spr-helper-empty';
+    empty.textContent = `No ${label} yet.`;
+    wrap.appendChild(empty);
+    return wrap;
+  }
+
+  items.forEach(text => {
+    const row = document.createElement('div');
+    row.className = 'spr-helper-item';
+
+    const value = document.createElement('div');
+    value.className = 'spr-helper-item-text';
+    value.textContent = text;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'spr-helper-btn secondary';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', async () => {
+      await copyToClipboard(text);
+      toast(`${label} copied.`);
+    });
+
+    row.appendChild(value);
+    row.appendChild(btn);
+    wrap.appendChild(row);
+  });
+
+  return wrap;
+}
+
+function renderFeedbackContent(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'spr-helper-text';
+  if (!text) {
+    wrap.textContent = 'No feedback yet.';
+    return wrap;
+  }
+  wrap.innerHTML = markdownToHtml(text);
+  return wrap;
+}
+
+function renderParagraphContent(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'spr-helper-text';
+  wrap.textContent = text || 'No paragraph yet.';
+  return wrap;
+}
+
+function setBusy(cardKey, busy) {
+  helperState.busy[cardKey] = !!busy;
+  const button = helperEls.cards[cardKey]?.generate;
+  if (!button) return;
+  if (!button.dataset.label) button.dataset.label = button.textContent || 'Generate';
+  button.disabled = busy;
+  button.textContent = busy ? 'Working...' : button.dataset.label;
+}
+
+function updateCardStatuses() {
+  if (!helperEls.root) return;
+
+  const subjectReady = !!helperState.subject;
+  setCardStatus('subject', subjectReady ? 'Ready' : 'Waiting for subject line');
+  setCardStatus('angles', subjectReady ? 'Ready' : 'Waiting for subject line');
+  setCardStatus('feedback', helperState.mailingReady ? 'Ready' : 'Open a mailing to enable');
+  setCardStatus('paragraph', helperState.paragraphEligible ? 'Ready' : 'Place cursor in empty paragraph');
+}
+
+function refreshHelperUI() {
+  if (!featuresReady || !helperEls.root) return;
+
+  const subjectReady = !!helperState.subject;
+  const paragraphReady = !!helperState.paragraphEligible;
+  const mailingReady = !!helperState.mailingReady;
+  const activeContext = helperState.activeContext || chooseHelperContext();
+
+  const showSubject = featureFlags.subjectGenerator && subjectReady && activeContext === 'subject';
+  const showAngles = featureFlags.angleAssistant && subjectReady && activeContext === 'angles';
+  const showFeedback = featureFlags.prFeedback && mailingReady && activeContext === 'feedback';
+  const showParagraph = featureFlags.paragraphWriter && paragraphReady && activeContext === 'paragraph';
+
+  setCardVisibility('subject', showSubject);
+  setCardVisibility('angles', showAngles);
+  setCardVisibility('feedback', showFeedback);
+  setCardVisibility('paragraph', showParagraph);
+
+  if (helperEls.emptyState) {
+    const hasVisibleCards = showSubject || showAngles || showFeedback || showParagraph;
+    helperEls.emptyState.style.display = hasVisibleCards ? 'none' : '';
+    if (!hasVisibleCards) {
+      switch (activeContext) {
+        case 'subject':
+          helperEls.emptyState.textContent = 'Add a subject line to get ideas.';
+          break;
+        case 'angles':
+          helperEls.emptyState.textContent = 'Add a subject line to get angle ideas.';
+          break;
+        case 'feedback':
+          helperEls.emptyState.textContent = 'Open a mailing to get feedback.';
+          break;
+        case 'paragraph':
+          helperEls.emptyState.textContent = 'Place the cursor in an empty paragraph.';
+          break;
+        default:
+          helperEls.emptyState.textContent = 'Nothing to help with yet.';
+      }
+    }
+  }
+
+  updateCardStatuses();
+
+  const subjectList = renderListItems(helperState.results.subject, 'subject line');
+  setCardBody('subject', subjectList);
+
+  const angleList = renderListItems(helperState.results.angles, 'angle');
+  setCardBody('angles', angleList);
+
+  const feedbackNode = renderFeedbackContent(helperState.results.feedback);
+  setCardBody('feedback', feedbackNode);
+  if (helperEls.cards.feedback.copy) {
+    helperEls.cards.feedback.copy.style.display = helperState.results.feedback ? '' : 'none';
+  }
+
+  const paragraphNode = renderParagraphContent(helperState.results.paragraph);
+  setCardBody('paragraph', paragraphNode);
+  if (helperEls.cards.paragraph.copy) {
+    helperEls.cards.paragraph.copy.style.display = helperState.results.paragraph ? '' : 'none';
+  }
+}
+
+function dismissNudge() {
+  helperState.nudgeDismissedUntil = Date.now() + (10 * 60 * 1000);
+  helperState.nudgeId = '';
+  helperState.nudgePhase = 'idle';
+  hideNudge();
+}
+
+const NUDGE_DELAY_MS = 650;
+const NUDGE_PROMPT_COOLDOWN_MS = 20 * 60 * 1000;
+const NUDGE_USED_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+async function loadNudgeHistory() {
+  helperState.nudgeHistory = await localStore.get(NUDGE_HISTORY_KEY, {});
+}
+
+function getMailingIdFromPath(pathname = window.location.pathname) {
+  const match = pathname.match(/\/mailings\/([^/]+)/i);
+  return match ? match[1] : '';
+}
+
+function refreshMailingContext() {
+  const path = window.location.pathname;
+  if (helperState.lastPath === path) return;
+  helperState.lastPath = path;
+  helperState.mailingId = getMailingIdFromPath(path);
+}
+
+function getNudgeEntry(type) {
+  const mailingId = helperState.mailingId;
+  if (!mailingId) return null;
+  if (!helperState.nudgeHistory[mailingId]) helperState.nudgeHistory[mailingId] = {};
+  if (!helperState.nudgeHistory[mailingId][type]) {
+    helperState.nudgeHistory[mailingId][type] = { promptedAt: 0, usedAt: 0 };
+  }
+  return helperState.nudgeHistory[mailingId][type];
+}
+
+function canPromptForType(type) {
+  const entry = getNudgeEntry(type);
+  if (!entry) return true;
+  const now = Date.now();
+  if (entry.usedAt && now - entry.usedAt < NUDGE_USED_COOLDOWN_MS) return false;
+  if (entry.promptedAt && now - entry.promptedAt < NUDGE_PROMPT_COOLDOWN_MS) return false;
+  return true;
+}
+
+function recordNudgePrompt(type) {
+  const entry = getNudgeEntry(type);
+  if (!entry) return;
+  entry.promptedAt = Date.now();
+  localStore.set(NUDGE_HISTORY_KEY, helperState.nudgeHistory);
+}
+
+function recordNudgeUsed(type) {
+  const entry = getNudgeEntry(type);
+  if (!entry) return;
+  entry.usedAt = Date.now();
+  localStore.set(NUDGE_HISTORY_KEY, helperState.nudgeHistory);
+}
+
+function shouldShowNudge() {
+  if (!featuresReady || extensionDisabled || !anyFeatureEnabled()) return false;
+  if (helperState.panelOpen) return false;
+  if (!featureFlags.subjectGenerator) return false;
+  if (!helperState.subject) return false;
+  if (!canPromptForType('subject')) return false;
+  if (Date.now() < helperState.nudgeDismissedUntil) return false;
+  return true;
+}
+
+function showNudge(text) {
+  if (!helperEls.bubble || !helperEls.bubbleText) return;
+  helperEls.bubbleText.textContent = text;
+  helperEls.bubble.style.display = 'flex';
+  if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
+  if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'none';
+  if (helperEls.bubbles) helperEls.bubbles.style.display = 'flex';
+  recordNudgePrompt('subject');
+}
+
+function hideNudge() {
+  if (helperState.nudgeTimer) {
+    clearTimeout(helperState.nudgeTimer);
+    helperState.nudgeTimer = null;
+  }
+  if (helperEls.bubble) helperEls.bubble.style.display = 'none';
+  if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
+  if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'none';
+  if (helperEls.bubbles) helperEls.bubbles.style.display = 'none';
+}
+
+function scheduleNudge(text) {
+  if (!helperEls.bubble || !helperEls.bubbleText) return;
+  if (helperState.nudgeTimer) clearTimeout(helperState.nudgeTimer);
+  helperState.nudgePendingText = text;
+  helperState.nudgeTimer = setTimeout(() => {
+    helperState.nudgeTimer = null;
+    if (!shouldShowNudge()) return;
+    helperState.nudgePhase = 'prompt';
+    showNudge(text);
+  }, NUDGE_DELAY_MS);
+}
+
+function maybeShowNudge() {
+  if (!shouldShowNudge()) {
+    hideNudge();
+    return;
+  }
+  if (helperState.nudgePhase === 'thinking') {
+    showNudge('Need help improving the subject line?');
+    if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'flex';
+    if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'none';
+    return;
+  }
+  if (helperState.nudgePhase === 'ready' && helperState.results.subject.length) {
+    showNudge('Need help improving the subject line?');
+    if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'flex';
+    if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
+    return;
+  }
+  if (helperState.lastNudgedSubject === helperState.subject) {
+    scheduleNudge('Need help improving the subject line?');
+    return;
+  }
+  helperState.lastNudgedSubject = helperState.subject;
+  scheduleNudge('Need help improving the subject line?');
+}
+
+async function startNudgeFlow() {
+  if (!shouldShowNudge()) return;
+  if (helperState.nudgePhase === 'thinking') return;
+  const subjectAtStart = helperState.subject;
+  helperState.activeContext = 'subject';
+  helperState.nudgePhase = 'thinking';
+  showNudge('Need help improving the subject line?');
+  if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'flex';
+  if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'none';
+  try {
+    await generateSubjectSuggestions(true);
+  } finally {
+    if (helperState.subject !== subjectAtStart) return;
+    if (helperState.results.subject.length) {
+      helperState.nudgePhase = 'ready';
+      recordNudgeUsed('subject');
+      if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
+      if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'flex';
+    } else {
+      helperState.nudgePhase = 'prompt';
+      if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
+    }
+  }
+}
+
+function updateHelperVisibility() {
+  if (!ensureHelperShell()) return;
+  const hidden = extensionDisabled || !anyFeatureEnabled();
+  helperEls.root.style.display = hidden ? 'none' : '';
+  if (hidden) {
+    hideNudge();
+    closeHelperPanel();
+  } else {
+    scheduleMailingCheck();
+    maybeShowNudge();
+  }
+}
+
+function updateSubjectValue(value) {
+  const next = (value || '').trim();
+  if (helperState.subject === next) return;
+  helperState.subject = next;
+  helperState.nudgePhase = 'idle';
+  helperState.nudgeSubject = next;
+  refreshMailingContext();
+  updateCardStatuses();
+  if (!next) {
+    helperState.results.subject = [];
+    helperState.results.angles = [];
+    helperState.lastAutoSubject = '';
+  }
+  refreshHelperUI();
+  maybeShowNudge();
+}
+
+function maybeAutoGenerateSubject() {
+  if (!featureFlags.subjectGenerator) return;
+  if (!helperState.subject) return;
+  if (helperState.lastAutoSubject === helperState.subject) return;
+  helperState.lastAutoSubject = helperState.subject;
+  generateSubjectSuggestions(true);
+}
+
+function parseListFromResponse(response, key) {
+  if (!response) return [];
+  let parsed = safeParseJSON(response);
+  if (!parsed) parsed = extractJSON(response);
+  if (parsed && Array.isArray(parsed[key])) {
+    return parsed[key].map(item => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
+  }
+
+  return response
+    .split(/\n|\r/)
+    .map(line => line.replace(/^[-*\d.\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+async function generateSubjectSuggestions(isAuto) {
+  if (!featureFlags.subjectGenerator) return;
+  if (!helperState.subject) {
+    toast('Add a subject line first.');
+    return;
+  }
+
+  setBusy('subject', true);
+  try {
+    let apiKey;
+    try { apiKey = await getApiKey(); } catch { return; }
+
+    let mailingHTML = '';
+    try { mailingHTML = await collectMailingHTML(); } catch { mailingHTML = ''; }
+
+    const MAX_MAILING_CHARS = 20000;
+    let trimmedMailingHTML = mailingHTML;
+    let truncationNote = '';
+    if (trimmedMailingHTML && trimmedMailingHTML.length > MAX_MAILING_CHARS) {
+      trimmedMailingHTML = trimmedMailingHTML.slice(0, MAX_MAILING_CHARS);
+      truncationNote = `\n\nNote: Mailing HTML truncated to first ${MAX_MAILING_CHARS} characters.`;
+    }
+
+    const userPrompt = `Current subject line: ${helperState.subject}\n\nMailing HTML:\n${trimmedMailingHTML || '(not available)'}${truncationNote}`;
+    const response = await openAIChat(apiKey, SUBJECT_SUGGESTIONS_SYSTEM_PROMPT, userPrompt, 0.6);
+    const items = parseListFromResponse(response, 'subjects');
+
+    helperState.results.subject = items.slice(0, 5);
+    refreshHelperUI();
+  } catch (err) {
+    console.error('[Smartpr Labs][Helper] Subject suggestions failed', err);
+    const msg = getOpenAIErrorMessage(err, 'Could not generate subject suggestions.');
+    toast(msg);
+  } finally {
+    setBusy('subject', false);
+  }
+}
+
+async function generateAngles() {
+  if (!featureFlags.angleAssistant) return;
+  if (!helperState.subject) {
+    toast('Add a subject line first.');
+    return;
+  }
+
+  setBusy('angles', true);
+  try {
+    let apiKey;
+    try { apiKey = await getApiKey(); } catch { return; }
+
+    const userPrompt = `Subject line: ${helperState.subject}\n\nAll output must stay in the same language as the subject line.`;
+    const response = await openAIChat(apiKey, ANGLE_SYSTEM_PROMPT, userPrompt, 0.7);
+    const items = parseListFromResponse(response, 'angles');
+
+    helperState.results.angles = items.slice(0, 5);
+    refreshHelperUI();
+  } catch (err) {
+    console.error('[Smartpr Labs][Helper] Angle suggestions failed', err);
+    const msg = getOpenAIErrorMessage(err, 'Could not generate angles.');
+    toast(msg);
+  } finally {
+    setBusy('angles', false);
   }
 }
 
@@ -373,1417 +1284,132 @@ function markdownToHtml(md) {
   return html;
 }
 
-function ensureFeedbackInputModal() {
-  if (inputModal && document.body.contains(inputModal)) return inputModal;
-  const modal = document.createElement('div');
-  modal.id = 'spr-feedback-input-modal';
-  modal.innerHTML = `
-    <div class="spr-feedback-input-card">
-      <div class="spr-feedback-input-header">
-        <strong>Input sent to ChatGPT</strong>
-        <button type="button" class="spr-feedback-action" data-feedback-input-close title="Close">✕</button>
-      </div>
-      <textarea readonly class="spr-feedback-input-text"></textarea>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  const closeBtn = modal.querySelector('[data-feedback-input-close]');
-  if (closeBtn) {
-    closeBtn.addEventListener('click', () => {
-      modal.style.display = 'none';
-    });
-  }
-  inputModal = modal;
-  return modal;
-}
+async function requestPRFeedback() {
+  if (!featureFlags.prFeedback) return;
 
-function showFeedbackInputModal() {
-  if (!lastFeedbackInput) {
-    toast('No input captured yet.');
-    return;
-  }
-  const modal = ensureFeedbackInputModal();
-  const textarea = modal.querySelector('.spr-feedback-input-text');
-  if (textarea) {
-    textarea.value = lastFeedbackInput;
-    textarea.scrollTop = 0;
-  }
-  modal.style.display = 'flex';
-}
-
-function handleBridgeMessage(event) {
-  if (!event || !event.data || typeof event.data !== 'object') return;
-  const { type, html, id } = event.data;
-  if (!type) return;
-
-  if (event.source === window) {
-    if (type === BRIDGE_READY) {
-      bridgeReady = true;
-      const waiters = bridgeReadyWaiters.slice();
-      bridgeReadyWaiters = [];
-      waiters.forEach(fn => { try { fn(); } catch { /* ignore */ } });
-      logFeedback('Bridge reported ready');
-    } else if (type === BRIDGE_RESPONSE && id) {
-      const pending = bridgeHtmlRequests.get(id);
-      if (!pending) return;
-      bridgeHtmlRequests.delete(id);
-      clearTimeout(pending.timeout);
-      pending.resolve(typeof html === 'string' ? html.trim() : '');
-      logFeedback('Received HTML from bridge', { id, length: html ? html.length : 0 });
-    } else if (type === PARAGRAPH_STATUS_EVENT) {
-      onParagraphStatus(event.data);
-    }
-  } else if (typeof event.origin === 'string' && event.origin.includes('app.getbee.io')) {
-    if (type === PARAGRAPH_FRAME_STATUS_EVENT) {
-      onParagraphFrameStatus(event.data);
-    } else if (type === PARAGRAPH_APPLY_RESULT_EVENT) {
-      onParagraphApplyResult(event.data);
-    }
-  }
-}
-
-if (!window.__sprFeedbackBridgeListenerAttached) {
-  window.addEventListener('message', handleBridgeMessage, false);
-  window.__sprFeedbackBridgeListenerAttached = true;
-}
-
-function injectBeeBridge() {
-  if (document.getElementById(BRIDGE_SCRIPT_ID)) return;
-  const script = document.createElement('script');
-  script.id = BRIDGE_SCRIPT_ID;
-  script.src = chrome.runtime.getURL('page-bridge.js');
-  script.async = false;
-  script.onload = () => {
-    setTimeout(() => {
-      if (script.parentNode) script.parentNode.removeChild(script);
-    }, 0);
-  };
-  (document.head || document.documentElement).appendChild(script);
-  logFeedback('Injected page bridge');
-}
-
-function waitForBridgeReady(timeout = 6000) {
-  if (bridgeReady) return Promise.resolve(true);
-  injectBeeBridge();
-  return new Promise(resolve => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      bridgeReadyWaiters = bridgeReadyWaiters.filter(fn => fn !== onReady);
-      logFeedback('Bridge ready wait timed out after', timeout, 'ms');
-      resolve(false);
-    }, timeout);
-    const onReady = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      bridgeReadyWaiters = bridgeReadyWaiters.filter(fn => fn !== onReady);
-      logFeedback('Bridge ready wait resolved');
-      resolve(true);
-    };
-    bridgeReadyWaiters.push(onReady);
-    try { window.postMessage({ type: BRIDGE_PING }, '*'); } catch { /* ignore */ }
-  });
-}
-
-async function requestBeeHtmlViaBridge(timeout = 6000) {
-  injectBeeBridge();
-  await waitForBridgeReady(6000);
-
-  const id = `spr-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
-  return new Promise(resolve => {
-    const timer = setTimeout(() => {
-      bridgeHtmlRequests.delete(id);
-      logFeedback('Bridge request timed out', { id, timeout });
-      resolve('');
-    }, timeout);
-    bridgeHtmlRequests.set(id, { resolve, timeout: timer });
-    try {
-      window.postMessage({ type: BRIDGE_REQUEST, id }, '*');
-      logFeedback('Requested HTML from bridge', { id });
-    } catch {
-      clearTimeout(timer);
-      bridgeHtmlRequests.delete(id);
-      logFeedback('Failed to post request to bridge', { id });
-      resolve('');
-    }
-  });
-}
-
-// ---------- Modal UI ----------
-function ensureModal() {
-  if ($('#sase-modal')) return;
-
-  const wrap = document.createElement('div');
-  wrap.id = 'sase-modal';
-  wrap.innerHTML = `
-    <div class="sase-card">
-      <div class="sase-row">
-        <strong>Smart.pr Labs — Angle Assistant</strong>
-        <button class="sase-btn secondary" id="sase-settings" title="Open settings">⚙️</button>
-        <button class="sase-close" title="Close" id="sase-close">✕</button>
-      </div>
-
-      <div class="sase-row">
-        <input id="sase-subject" type="text" placeholder="Subject line (prefilled from the form)" />
-      </div>
-
-      <div class="sase-row">
-        <input id="sase-sender" type="text" placeholder="Sender (prefilled from the form)" />
-      </div>
-
-      <div class="sase-row">
-        <textarea id="sase-desc" rows="3" placeholder="Optional: short description / context (e.g., what’s new, data points, launch details)"></textarea>
-      </div>
-
-      <div class="sase-row">
-        <button id="sase-gen-angles" class="sase-btn">✨ Generate angles</button>
-        <button id="sase-clear" class="sase-btn secondary">Clear</button>
-      </div>
-
-      <div class="sase-row sase-small">
-        Angles are one-sentence perspectives you can take on the story. Use any of them to draft a press release.
-      </div>
-
-      <div class="sase-row"><strong>Angles</strong></div>
-      <div id="sase-angles" class="sase-list"></div>
-    </div>
-  `;
-  document.body.appendChild(wrap);
-
-  // Wire controls
-  $('#sase-close').onclick = () => $('#sase-modal').style.display = 'none';
-  $('#sase-clear').onclick = () => { $('#sase-angles').innerHTML = ''; };
-  $('#sase-settings').onclick = () => chrome.runtime.sendMessage({ action: 'openOverviewPage' });
-  $('#sase-gen-angles').onclick = onGenerateAngles;
-}
-
-function setBusy(btnId, busy) {
-  const btn = $(btnId);
-  if (!btn) return;
-  btn.disabled = busy;
-  const orig = btn.dataset.label || btn.textContent;
-  if (!btn.dataset.label) btn.dataset.label = orig;
-  btn.textContent = busy ? 'Working…' : btn.dataset.label;
-}
-
-// ---------- Generators ----------
-async function onGenerateAngles() {
-  const subject = $('#sase-subject').value.trim();
-  const desc = $('#sase-desc').value.trim();
-  if (!subject) return toast('Please enter a subject.');
-
-  let key; try { key = await getApiKey(); } catch { return; }
-
-  const sys = `You are a senior PR strategist. Produce concise, one-sentence "angles" (perspectives) on the topic.
-Return JSON only: {"angles":[ "…", "…", ... ]} with 1–5 items (never more than five). Each item <= 30 words, crisp, distinct.
-Determine the dominant language of the subject line and write every angle in that language. Do not translate into English unless the subject itself is in English.`;
-  const user = `Subject line: ${subject}
-${desc ? `Short description: ${desc}` : ''}
-All output must stay in the same language as the subject line.`;
-
-  setBusy('#sase-gen-angles', true);
+  setBusy('feedback', true);
   try {
-    const json = await openAIChat(key, sys, user, 0.7);
-    const parsed = safeParseJSON(json);
-    renderAngles(parsed?.angles || []);
-  } catch (e) {
-    console.error('[SASE] angles error', e);
-    toast(getOpenAIErrorMessage(e, 'Error generating angles.'));
-  } finally {
-    setBusy('#sase-gen-angles', false);
-  }
-}
+    let apiKey;
+    try { apiKey = await getApiKey(); } catch { return; }
 
-// ---------- Renderers ----------
-function renderAngles(angles) {
-  const box = $('#sase-angles');
-  box.innerHTML = '';
-  const trimmed = (angles || []).map(a => typeof a === 'string' ? a.trim() : '').filter(Boolean).slice(0, 5);
-  if (!trimmed.length) {
-    box.innerHTML = '<div class="sase-small">No angles generated.</div>';
-    return;
-  }
-
-  trimmed.forEach((angle, idx) => {
-    const div = document.createElement('div');
-    div.className = 'sase-item';
-    div.innerHTML = `
-      <h4>Angle #${idx + 1}</h4>
-      <div class="sase-small">${escapeHTML(angle)}</div>
-
-      <div class="sase-actions" style="margin-top:8px">
-        <button class="sase-btn" data-copy-angle="${escapeAttr(angle)}">Copy angle</button>
-        <button class="sase-btn secondary" data-pressrelease-angle="${escapeAttr(angle)}">Write press release</button>
-        <button class="sase-btn secondary" data-copy-pr style="display:none">Copy press release</button>
-      </div>
-
-      <pre class="sase-mono sase-small" style="white-space:pre-wrap; display:none"></pre>
-    `;
-    box.appendChild(div);
-
-    div.querySelector('[data-copy-angle]').onclick = async (e) => {
-      await copyToClipboard(e.target.getAttribute('data-copy-angle'));
-      toast('Angle copied.');
-    };
-
-    div.querySelector('[data-pressrelease-angle]').onclick = async (e) => {
-      const ang = e.target.getAttribute('data-pressrelease-angle');
-      await writePressReleaseFromAngle(div, ang);
-    };
-
-    const copyPrBtn = div.querySelector('[data-copy-pr]');
-    if (copyPrBtn) {
-      copyPrBtn.onclick = async () => {
-        const pre = div.querySelector('pre');
-        if (!pre?.textContent?.trim()) return toast('No press release yet.');
-        await copyToClipboard(pre.textContent);
-        toast('Press release copied.');
-      };
-    }
-  });
-}
-
-// ---------- Press release writers ----------
-async function writePressReleaseFromAngle(container, angle) {
-  let key; try { key = await getApiKey(); } catch { return; }
-  const subject = $('#sase-subject').value.trim();
-  const desc = $('#sase-desc').value.trim();
-  const sender = $('#sase-sender')?.value.trim();
-
-  const sys = `You are a PR copywriter. Based on the provided one-sentence angle and context, craft a compelling press release with your own strong headline.
-Length ≈300–350 words. 
-Structure:
-- Headline (you create)
-- Dek (1 sentence)
-- City, Date —
-- Body with two quotes (one CEO/founder, one external expert)
-- Boilerplate
-- Media contact (use the provided sender details verbatim when available; otherwise create a brief placeholder)
-Tone: clear, factual, newsworthy. Avoid fluff.
-Determine the dominant language of the provided angle or subject and write the entire press release in that language. Only default to English if the language cannot be determined.`;
-  const user = `Angle: ${angle}
-Subject line: ${subject}
-${desc ? `Context: ${desc}` : ''}
-${sender ? `Sender contact (use verbatim for the Media contact line): ${sender}` : 'Sender contact: Not provided; create a short placeholder.'}
-Language requirement: Match the language used in the angle/subject.`;
-
-  try {
-    setPressReleaseBusy(container, true);
-    const text = await openAIChat(key, sys, user, 0.7);
-    showPR(container, text);
-  } catch (e) {
-    console.error('[SASE] PR from angle error', e);
-    toast(getOpenAIErrorMessage(e, 'Error writing press release.'));
-    resetPressRelease(container);
-  } finally {
-    setPressReleaseBusy(container, false);
-  }
-}
-
-function showPR(container, text) {
-  const pre = container.querySelector('pre');
-  pre.textContent = text.trim();
-  pre.style.display = 'block';
-  const actionRow = container.querySelector('.sase-actions');
-  const copyBtn = actionRow?.querySelector('[data-copy-pr]');
-  if (copyBtn) {
-    copyBtn.style.display = '';
-    copyBtn.disabled = false;
-  }
-}
-
-function setPressReleaseBusy(container, busy) {
-  const btn = container.querySelector('[data-pressrelease-angle]');
-  if (!btn) return;
-  const copyBtn = container.querySelector('[data-copy-pr]');
-  const pre = container.querySelector('pre');
-  if (busy) {
-    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-    btn.textContent = 'Generating…';
-    btn.disabled = true;
-    if (copyBtn) {
-      copyBtn.style.display = 'none';
-      copyBtn.disabled = true;
-    }
-    if (pre) {
-      pre.textContent = 'Generating press release…';
-      pre.style.display = 'block';
-    }
-  } else {
-    btn.disabled = false;
-    if (btn.dataset.label) btn.textContent = btn.dataset.label;
-  }
-}
-
-function resetPressRelease(container) {
-  const pre = container.querySelector('pre');
-  if (pre) {
-    pre.textContent = '';
-    pre.style.display = 'none';
-  }
-  const copyBtn = container.querySelector('[data-copy-pr]');
-  if (copyBtn) {
-    copyBtn.style.display = 'none';
-    copyBtn.disabled = false;
-  }
-}
-
-// ---------- Button injection & state mirroring ----------
-let mirrorInterval = null;
-
-function ensureInjected() {
-  if (!featureFlags.angleAssistant) return;
-  // Match your Angular markup
-  const candidates = $$('button.form-mailing-edit__button, button[ng-click="onDesignClick();"]');
-  const createBtn = candidates.find(b => (b.textContent || '').trim().toLowerCase() === 'create content');
-  if (!createBtn) return;
-
-  // Avoid duplicate injection
-  if (!createBtn.dataset.saseInjected) {
-    const genBtn = document.createElement('button');
-    genBtn.type = 'button';
-    genBtn.className = 'form-mailing-edit__button ui-button__root ui-button__root--default ui-button__root--big sase-generate-btn';
-    genBtn.textContent = '✨ Generate angles';
-    createBtn.insertAdjacentElement('afterend', genBtn);
-    createBtn.dataset.saseInjected = '1';
-
-    // Build modal once
-    ensureModal();
-
-    // Open modal + prefill Subject from the real field
-    genBtn.addEventListener('click', () => {
-      const subjField = getSubjectField();
-      const modalSubj = $('#sase-subject');
-      if (modalSubj) modalSubj.value = subjField && subjField.value ? subjField.value.trim() : '';
-      const senderField = getSenderField();
-      const modalSender = $('#sase-sender');
-      if (modalSender) modalSender.value = senderField && senderField.value ? senderField.value.trim() : '';
-      $('#sase-modal').style.display = 'flex';
-    });
-  }
-
-  // Mirror disabled state onto our button
-  const ourBtn = createBtn.nextElementSibling && createBtn.nextElementSibling.classList.contains('sase-generate-btn')
-    ? createBtn.nextElementSibling
-    : null;
-  if (!ourBtn) return;
-
-  const mirror = () => {
-    const isDisabled = createBtn.hasAttribute('disabled') || createBtn.disabled || createBtn.classList.contains('ui-button__root--disabled');
-    ourBtn.disabled = !!isDisabled;
-    // Optional: style parity (grey out)
-    if (isDisabled) {
-      ourBtn.style.opacity = '0.6';
-      ourBtn.style.pointerEvents = 'none';
-    } else {
-      ourBtn.style.opacity = '';
-      ourBtn.style.pointerEvents = '';
-    }
-  };
-  mirror();
-
-  // Watch attribute changes to keep in sync
-  const attrObs = new MutationObserver(mirror);
-  attrObs.observe(createBtn, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
-  if (createBtn._saseObserver) {
-    try { createBtn._saseObserver.disconnect(); } catch { /* ignore */ }
-  }
-  createBtn._saseObserver = attrObs;
-
-  // Also poll lightly in case Angular swaps the node
-  if (mirrorInterval) clearInterval(mirrorInterval);
-  mirrorInterval = setInterval(() => {
-    if (!document.body.contains(createBtn)) {
-      clearInterval(mirrorInterval);
+    const mailingHTML = await collectMailingHTML();
+    if (!mailingHTML) {
+      toast('Could not find the mailing content on this page.');
       return;
     }
-    mirror();
-  }, 800);
-}
 
-function teardownAngleAssistant() {
-  if (mirrorInterval) {
-    clearInterval(mirrorInterval);
-    mirrorInterval = null;
+    const userPrompt = `Here is the HTML of the mailing currently being edited in Smart.pr:\n\n${mailingHTML}`;
+    const feedback = await openAIChat(apiKey, PR_FEEDBACK_SYSTEM_PROMPT, userPrompt, 0.4);
+    helperState.results.feedback = (feedback || '').trim();
+    refreshHelperUI();
+  } catch (err) {
+    console.error('[Smartpr Labs][Helper] PR feedback failed', err);
+    const msg = getOpenAIErrorMessage(err, 'Could not fetch PR feedback.');
+    toast(msg);
+  } finally {
+    setBusy('feedback', false);
   }
-  $$('.sase-generate-btn').forEach(btn => btn.remove());
-  const modal = $('#sase-modal');
-  if (modal) modal.remove();
-  $$('[data-sase-injected]').forEach(btn => {
-    if (btn._saseObserver) {
-      try { btn._saseObserver.disconnect(); } catch { /* ignore */ }
-      delete btn._saseObserver;
-    }
-    btn.removeAttribute('data-sase-injected');
-  });
 }
 
-// ---------- Paragraph Writer ----------
-let paragraphOverlayEl = null;
-let paragraphOverlayButton = null;
-let paragraphOverlayVisible = false;
-let paragraphOverlayBusy = false;
-let paragraphOverlayInitialized = false;
-let paragraphOverlayListenersAttached = false;
-let paragraphOverlayHint = null;
-const PARAGRAPH_OVERLAY_HINT_DEFAULT = 'Draft the next lines with AI.';
-let paragraphWriterInfo = {
-  blockId: null,
-  blockType: '',
-  isEmpty: false,
-  isText: false,
-  version: 0,
-  source: '',
-  timestamp: 0,
-  rect: null,
-};
-let lastGeneratedParagraph = '';
-let paragraphApplyTimeout = null;
-
-function initParagraphWriter() {
+async function generateParagraph() {
   if (!featureFlags.paragraphWriter) return;
-  ensureParagraphOverlay();
-  attachParagraphOverlayListeners();
-  paragraphOverlayInitialized = true;
-}
-
-function ensureParagraphOverlay() {
-  if (paragraphOverlayEl) return paragraphOverlayEl;
-  const overlay = document.createElement('div');
-  overlay.id = 'spr-paragraph-overlay';
-  Object.assign(overlay.style, {
-    position: 'fixed',
-    zIndex: '1000001',
-    display: 'none',
-    alignItems: 'center',
-    gap: '12px',
-    background: 'linear-gradient(130deg, rgba(20,196,163,0.92), rgba(15,123,255,0.9))',
-    color: '#071821',
-    padding: '12px 16px',
-    borderRadius: '16px',
-    border: '1px solid rgba(7,24,33,0.18)',
-    boxShadow: '0 16px 32px rgba(7,24,33,0.28)',
-    backdropFilter: 'blur(10px)'
-  });
-
-  const contentWrap = document.createElement('div');
-  Object.assign(contentWrap.style, {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '2px'
-  });
-
-  const label = document.createElement('span');
-  label.textContent = 'Paragraph Writer';
-  Object.assign(label.style, {
-    font: '600 13px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase'
-  });
-
-  const hint = document.createElement('span');
-  hint.textContent = PARAGRAPH_OVERLAY_HINT_DEFAULT;
-  Object.assign(hint.style, {
-    font: '12px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
-    color: '#032030',
-    opacity: '0.85'
-  });
-  paragraphOverlayHint = hint;
-
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'spr-paragraph-overlay-btn';
-  button.textContent = '✨ Write paragraph';
-  Object.assign(button.style, {
-    font: '600 13px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif',
-    padding: '8px 12px',
-    borderRadius: '12px',
-    border: '1px solid rgba(7,24,33,0.15)',
-    background: '#ffffff',
-    color: '#0b3544',
-    cursor: 'pointer'
-  });
-  button.addEventListener('click', handleParagraphOverlayClick);
-  button.addEventListener('mouseenter', () => button.style.background = '#f1f5ff');
-  button.addEventListener('mouseleave', () => button.style.background = '#ffffff');
-  button.addEventListener('mousedown', evt => {
-    evt.preventDefault();
-  });
-  button.tabIndex = -1;
-
-  contentWrap.appendChild(label);
-  contentWrap.appendChild(hint);
-
-  overlay.appendChild(contentWrap);
-  overlay.appendChild(button);
-  document.body.appendChild(overlay);
-
-  paragraphOverlayEl = overlay;
-  paragraphOverlayButton = button;
-  return overlay;
-}
-
-function attachParagraphOverlayListeners() {
-  if (paragraphOverlayListenersAttached) return;
-  const reposition = () => positionParagraphOverlay();
-  window.addEventListener('scroll', reposition, true);
-  window.addEventListener('resize', reposition, true);
-  paragraphOverlayListenersAttached = true;
-}
-
-function detachParagraphOverlayListeners() {
-  if (!paragraphOverlayListenersAttached) return;
-  window.removeEventListener('scroll', positionParagraphOverlay, true);
-  window.removeEventListener('resize', positionParagraphOverlay, true);
-  paragraphOverlayListenersAttached = false;
-}
-
-function positionParagraphOverlay() {
-  if (!paragraphOverlayEl || paragraphOverlayEl.style.display === 'none') return;
-  const frame = getBeeIframe();
-  if (!frame) {
-    hideParagraphOverlay(true);
-    return;
-  }
-  const frameRect = frame.getBoundingClientRect();
-  if (!frameRect || frameRect.width <= 0 || frameRect.height <= 0) {
-    hideParagraphOverlay(true);
-    return;
-  }
-  const overlayWidth = paragraphOverlayEl.offsetWidth || 220;
-  const overlayHeight = paragraphOverlayEl.offsetHeight || 48;
-  const offset = 12;
-
-  const blockRect = paragraphWriterInfo.rect;
-  if (blockRect && blockRect.width > 0 && blockRect.height > 0) {
-    let left = frameRect.left + blockRect.left + blockRect.width - overlayWidth + offset;
-    let top = frameRect.top + blockRect.top - overlayHeight - offset;
-    if (left < frameRect.left + offset) left = frameRect.left + blockRect.left + offset;
-    if (top < frameRect.top + offset) {
-      top = frameRect.top + blockRect.top + blockRect.height + offset;
-    }
-    paragraphOverlayEl.style.left = `${Math.max(left, 12)}px`;
-    paragraphOverlayEl.style.top = `${Math.max(top, 12)}px`;
+  if (!helperState.paragraphEligible) {
+    toast('Place the cursor in an empty paragraph first.');
     return;
   }
 
-  const leftFallback = frameRect.right - overlayWidth - offset;
-  const topFallback = frameRect.bottom - overlayHeight - offset;
-  paragraphOverlayEl.style.left = `${Math.max(leftFallback, frameRect.left + offset, 12)}px`;
-  paragraphOverlayEl.style.top = `${Math.max(topFallback, frameRect.top + offset, 12)}px`;
-}
-
-function getBeeIframe() {
-  return document.querySelector('iframe[src*="app.getbee.io"]');
-}
-
-function showParagraphOverlay() {
-  if (!featureFlags.paragraphWriter) return;
-  const overlay = ensureParagraphOverlay();
-  overlay.style.display = 'flex';
-  paragraphOverlayVisible = true;
-  setParagraphOverlayBusy(paragraphOverlayBusy);
-  positionParagraphOverlay();
-}
-
-function hideParagraphOverlay(force = false) {
-  if (!paragraphOverlayEl) return;
-  if (paragraphOverlayBusy && !force) return;
-  paragraphOverlayEl.style.display = 'none';
-  paragraphOverlayVisible = false;
-}
-
-function setParagraphOverlayBusy(busy) {
-  paragraphOverlayBusy = !!busy;
-  if (!paragraphOverlayButton) ensureParagraphOverlay();
-  if (!paragraphOverlayButton) return;
-  paragraphOverlayButton.disabled = paragraphOverlayBusy;
-  paragraphOverlayButton.textContent = paragraphOverlayBusy ? 'Writing…' : '✨ Write paragraph';
-  paragraphOverlayButton.style.opacity = paragraphOverlayBusy ? '0.7' : '';
-  paragraphOverlayButton.style.cursor = paragraphOverlayBusy ? 'default' : 'pointer';
-  if (paragraphOverlayHint) {
-    paragraphOverlayHint.textContent = paragraphOverlayBusy ? 'Drafting your next paragraph…' : PARAGRAPH_OVERLAY_HINT_DEFAULT;
-  }
-}
-
-function refreshParagraphOverlayVisibility() {
-  if (!featureFlags.paragraphWriter) {
-    hideParagraphOverlay(true);
-    return;
-  }
-  const eligible = paragraphWriterInfo.isText && paragraphWriterInfo.isEmpty;
-  if (eligible) {
-    showParagraphOverlay();
-  } else {
-    hideParagraphOverlay();
-  }
-  if (paragraphOverlayVisible) {
-    positionParagraphOverlay();
-  }
-}
-
-function onParagraphStatus(payload) {
-  if (!featureFlags.paragraphWriter) return;
-  const status = payload?.status && typeof payload.status === 'object' ? payload.status : payload;
-  if (!status || typeof status !== 'object') {
-    if (!paragraphOverlayBusy) hideParagraphOverlay();
-    return;
-  }
-  const blockType = status.blockType || status.type || paragraphWriterInfo.blockType || '';
-  const isText = status.isText !== undefined ? !!status.isText : isTextualBlockType(blockType);
-  paragraphWriterInfo = {
-    blockId: status.blockId ?? paragraphWriterInfo.blockId ?? null,
-    blockType,
-    isEmpty: !!status.isEmpty,
-    isText,
-    version: typeof status.version === 'number' ? status.version : (paragraphWriterInfo.version + 1),
-    source: status.source || 'api',
-    timestamp: Date.now(),
-    rect: normalizeParagraphRect(status.rect) ?? paragraphWriterInfo.rect ?? null,
-  };
-  if (!paragraphOverlayBusy) {
-    refreshParagraphOverlayVisibility();
-  }
-  positionParagraphOverlay();
-}
-
-function onParagraphFrameStatus(payload) {
-  if (!featureFlags.paragraphWriter || !payload || typeof payload !== 'object') return;
-  const text = normalizeParagraphString(payload.text || '');
-  const isEmpty = payload.isEmpty !== undefined
-    ? !!payload.isEmpty
-    : !text || text.toLowerCase() === PARAGRAPH_PLACEHOLDER_TEXT.toLowerCase();
-  paragraphWriterInfo = {
-    blockId: payload.editorId ?? paragraphWriterInfo.blockId ?? null,
-    blockType: payload.blockType || paragraphWriterInfo.blockType || 'text',
-    isEmpty,
-    isText: true,
-    version: paragraphWriterInfo.version + 1,
-    source: 'frame',
-    timestamp: Date.now(),
-    rect: normalizeParagraphRect(payload.rect),
-  };
-  if (!paragraphOverlayBusy) {
-    refreshParagraphOverlayVisibility();
-  }
-  positionParagraphOverlay();
-}
-
-async function handleParagraphOverlayClick() {
-  if (paragraphOverlayBusy) return;
-  setParagraphOverlayBusy(true);
+  setBusy('paragraph', true);
   try {
+    let apiKey;
+    try { apiKey = await getApiKey(); } catch { return; }
+
     const mailingHTML = await collectMailingHTML();
     if (!mailingHTML) {
       toast('Could not detect the mailing content.');
-      setParagraphOverlayBusy(false);
       return;
     }
-    let apiKey;
-    try {
-      apiKey = await getApiKey();
-    } catch {
-      setParagraphOverlayBusy(false);
-      return;
-    }
+
     const userPrompt = `Here is the full HTML of the mailing currently open in Smart.pr:\n\n${mailingHTML}\n\nWrite the very next paragraph that should follow, using the dominant language of the mailing.`;
     const result = await openAIChat(apiKey, PARAGRAPH_WRITER_SYSTEM_PROMPT, userPrompt, 0.7);
-    const paragraph = (result || '').trim();
-    if (!paragraph) {
-      toast('ChatGPT did not return a paragraph. Try again.');
-      setParagraphOverlayBusy(false);
-      return;
-    }
-    lastGeneratedParagraph = paragraph;
-    const html = buildParagraphHtml(paragraph);
-    if (!html) {
-      toast('Generated paragraph was empty.');
-      setParagraphOverlayBusy(false);
-      return;
-    }
-    if (dispatchParagraphToBee(html)) {
-      clearParagraphApplyTimeout();
-      paragraphApplyTimeout = setTimeout(() => {
-        setParagraphOverlayBusy(false);
-        refreshParagraphOverlayVisibility();
-      }, 4000);
-    } else {
-      const appliedLocally = applyParagraphFallback(html);
-      setParagraphOverlayBusy(false);
-      if (appliedLocally) {
-        paragraphWriterInfo.isEmpty = false;
-        toast('Paragraph drafted!');
-        refreshParagraphOverlayVisibility();
-      } else {
-        await copyToClipboard(paragraph);
-        toast('Paragraph copied to clipboard.');
-      }
-      lastGeneratedParagraph = '';
-    }
+    helperState.results.paragraph = (result || '').trim();
+    refreshHelperUI();
   } catch (err) {
-    console.error('[Smartpr Labs][ParagraphWriter] Failed to write paragraph', err);
-    toast(getOpenAIErrorMessage(err, 'Could not generate a paragraph. Please try again.'));
-    lastGeneratedParagraph = '';
-    setParagraphOverlayBusy(false);
-  }
-}
-
-function dispatchParagraphToBee(html) {
-  const frame = getBeeIframe();
-  if (!frame || !frame.contentWindow) return false;
-  try {
-    frame.contentWindow.postMessage({
-      type: PARAGRAPH_APPLY_EVENT,
-      html,
-      blockId: paragraphWriterInfo.blockId,
-      source: 'smartpr-labs',
-      placeholder: PARAGRAPH_PLACEHOLDER_TEXT
-    }, BEE_FRAME_ORIGIN);
-    return true;
-  } catch (err) {
-    console.warn('[Smartpr Labs][ParagraphWriter] Failed to post message to BEE iframe', err);
-    return false;
-  }
-}
-
-function onParagraphApplyResult(payload) {
-  clearParagraphApplyTimeout();
-  setParagraphOverlayBusy(false);
-  if (payload?.success) {
-    paragraphWriterInfo.isEmpty = false;
-    toast('Paragraph drafted!');
-  } else if (lastGeneratedParagraph) {
-    copyToClipboard(lastGeneratedParagraph).then(() => {
-      toast('Paragraph copied to clipboard.');
-    }).catch(() => {
-      toast('Paragraph copied to clipboard.');
-    });
-  }
-  lastGeneratedParagraph = '';
-  refreshParagraphOverlayVisibility();
-}
-
-function clearParagraphApplyTimeout() {
-  if (paragraphApplyTimeout) {
-    clearTimeout(paragraphApplyTimeout);
-    paragraphApplyTimeout = null;
-  }
-}
-
-function buildParagraphHtml(text) {
-  if (!text) return '';
-  const escaped = escapeHTML(text.trim());
-  if (!escaped) return '';
-  const parts = escaped.split(/\n{2,}/).map(block => {
-    const withBreaks = block.replace(/\n/g, '<br>');
-    return `<p>${withBreaks}</p>`;
-  });
-  return parts.join('') || `<p>${escaped}</p>`;
-}
-
-function normalizeParagraphString(text) {
-  return (text || '')
-    .replace(/\u00A0/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function isTextualBlockType(type) {
-  if (!type || typeof type !== 'string') return false;
-  return /text|paragraph|body|copy|content/i.test(type);
-}
-
-function teardownParagraphWriter() {
-  clearParagraphApplyTimeout();
-  hideParagraphOverlay(true);
-  detachParagraphOverlayListeners();
-  if (paragraphOverlayEl) {
-    try { paragraphOverlayEl.remove(); } catch { /* ignore */ }
-  }
-  paragraphOverlayEl = null;
-  paragraphOverlayButton = null;
-  paragraphOverlayVisible = false;
-  paragraphOverlayBusy = false;
-  paragraphOverlayInitialized = false;
-  paragraphWriterInfo = {
-    blockId: null,
-    blockType: '',
-    isEmpty: false,
-    isText: false,
-    version: 0,
-    source: '',
-    timestamp: 0,
-    rect: null,
-  };
-  lastGeneratedParagraph = '';
-}
-
-function normalizeParagraphRect(rect) {
-  if (!rect || typeof rect !== 'object') return null;
-  const top = Number(rect.top);
-  const left = Number(rect.left);
-  const width = Number(rect.width);
-  const height = Number(rect.height);
-  if (!Number.isFinite(top) || !Number.isFinite(left) || !Number.isFinite(width) || !Number.isFinite(height)) {
-    return null;
-  }
-  return { top, left, width, height };
-}
-
-function applyParagraphFallback(html) {
-  const editorCandidates = [
-    document.querySelector('.content-labels--paragraph .module--selected .mce-content-body'),
-    document.querySelector('.module--selected.content-labels--paragraph .mce-content-body'),
-    document.querySelector('.mce-content-body.mce-edit-focus'),
-    document.querySelector('[data-qa="tinyeditor-root-element"].mce-content-body')
-  ].filter(Boolean);
-  const editorEl = editorCandidates.find(el => el && el.isConnected);
-  if (!editorEl) return false;
-
-  let applied = false;
-  if (typeof window !== 'undefined' && window.tinymce && typeof editorEl.id === 'string' && editorEl.id) {
-    try {
-      const instance = window.tinymce.get(editorEl.id);
-      if (instance) {
-        instance.focus();
-        instance.setContent(html);
-        instance.fire('change');
-        applied = true;
-      }
-    } catch (err) {
-      console.debug('[Smartpr Labs][ParagraphWriter] TinyMCE fallback failed', err?.message || err);
-    }
-  }
-
-  if (!applied) {
-    editorEl.innerHTML = html;
-    try {
-      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-    } catch { /* ignore */ }
-    applied = true;
-  }
-
-  if (applied) {
-    try { editorEl.focus(); } catch { /* ignore */ }
-  }
-  return applied;
-}
-
-
-// ---------- Subject Line Generator ----------
-let subjectGeneratorButton = null;
-let subjectGeneratorObserver = null;
-let subjectGeneratorInput = null;
-let subjectGeneratorContainer = null;
-let subjectGeneratorBusy = false;
-
-function mirrorSubjectGeneratorState() {
-  if (!subjectGeneratorButton || !subjectGeneratorInput) return;
-  const input = subjectGeneratorInput;
-  const baseDisabled = input.disabled
-    || input.hasAttribute('disabled')
-    || input.getAttribute('aria-disabled') === 'true';
-  const disabled = subjectGeneratorBusy || baseDisabled;
-  if (subjectGeneratorButton.disabled !== !!disabled) {
-    subjectGeneratorButton.disabled = !!disabled;
-  }
-
-  if (subjectGeneratorBusy) {
-    if (!subjectGeneratorButton.dataset.label) {
-      subjectGeneratorButton.dataset.label = subjectGeneratorButton.textContent || '✨ Generate subject';
-    }
-    if (subjectGeneratorButton.textContent !== 'Working…') {
-      subjectGeneratorButton.textContent = 'Working…';
-    }
-    if (subjectGeneratorButton.style.opacity !== '0.7') {
-      subjectGeneratorButton.style.opacity = '0.7';
-    }
-    if (subjectGeneratorButton.style.pointerEvents !== 'none') {
-      subjectGeneratorButton.style.pointerEvents = 'none';
-    }
-    return;
-  }
-
-  if (subjectGeneratorButton.dataset.label) {
-    if (subjectGeneratorButton.textContent !== subjectGeneratorButton.dataset.label) {
-      subjectGeneratorButton.textContent = subjectGeneratorButton.dataset.label;
-    }
-  }
-  const targetOpacity = baseDisabled ? '0.6' : '';
-  if (subjectGeneratorButton.style.opacity !== targetOpacity) {
-    subjectGeneratorButton.style.opacity = targetOpacity;
-  }
-  const targetPointerEvents = baseDisabled ? 'none' : '';
-  if (subjectGeneratorButton.style.pointerEvents !== targetPointerEvents) {
-    subjectGeneratorButton.style.pointerEvents = targetPointerEvents;
-  }
-}
-
-function setSubjectGeneratorBusy(busy) {
-  subjectGeneratorBusy = !!busy;
-  mirrorSubjectGeneratorState();
-}
-
-function ensureSubjectGeneratorButton() {
-  if (!featureFlags.subjectGenerator) return;
-  const field = getSubjectField();
-  if (!field) return;
-
-  subjectGeneratorInput = field;
-  const container = field.closest('.form-mailing-edit__field') || field.parentElement;
-  if (!container) return;
-  subjectGeneratorContainer = container;
-
-  let btn = container.querySelector('.spr-subject-generate-btn');
-  if (!btn) {
-    btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'ui-button__root ui-button__root--default ui-button__root--small spr-subject-generate-btn';
-    btn.textContent = '✨ Generate subject';
-    btn.style.marginLeft = '8px';
-    btn.style.whiteSpace = 'nowrap';
-    btn.addEventListener('click', onGenerateSubjectLine);
-    btn.dataset.sprSubjectListener = '1';
-    container.appendChild(btn);
-  } else if (!btn.dataset.sprSubjectListener) {
-    btn.addEventListener('click', onGenerateSubjectLine);
-    btn.dataset.sprSubjectListener = '1';
-  }
-
-  subjectGeneratorButton = btn;
-  if (subjectGeneratorButton.style.flex !== '0 0 auto') {
-    subjectGeneratorButton.style.flex = '0 0 auto';
-  }
-  if (!subjectGeneratorButton.dataset.label) {
-    subjectGeneratorButton.dataset.label = subjectGeneratorButton.textContent || '✨ Generate subject';
-  }
-
-  if (!container.dataset.sprSubjectLayoutApplied) {
-    container.dataset.sprSubjectPrevDisplay = container.style.display || '';
-    container.dataset.sprSubjectPrevAlign = container.style.alignItems || '';
-    container.dataset.sprSubjectPrevGap = container.style.gap || '';
-    const computed = typeof window !== 'undefined' && window.getComputedStyle
-      ? window.getComputedStyle(container)
-      : null;
-    if (!computed || computed.display !== 'flex') {
-      container.style.display = 'flex';
-    }
-    if (!computed || computed.alignItems === 'stretch') {
-      container.style.alignItems = 'center';
-    }
-    if (!computed || ((computed.gap === 'normal' || computed.gap === '0px') && !(container.style.gap && container.style.gap.trim()))) {
-      container.style.gap = container.style.gap || '8px';
-    }
-    container.dataset.sprSubjectLayoutApplied = '1';
-  }
-
-  if (!field.dataset.sprSubjectFlexApplied) {
-    field.dataset.sprSubjectPrevFlex = field.style.flex || '';
-    if (!(field.style.flex && field.style.flex.trim())) {
-      field.style.flex = '1 1 auto';
-    }
-    field.dataset.sprSubjectFlexApplied = '1';
-  }
-
-  if (subjectGeneratorObserver) {
-    try { subjectGeneratorObserver.disconnect(); } catch { /* ignore */ }
-  }
-  subjectGeneratorObserver = new MutationObserver(mirrorSubjectGeneratorState);
-  subjectGeneratorObserver.observe(field, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
-
-  mirrorSubjectGeneratorState();
-}
-
-async function onGenerateSubjectLine() {
-  if (!featureFlags.subjectGenerator) return;
-
-  const field = (subjectGeneratorInput && document.contains(subjectGeneratorInput))
-    ? subjectGeneratorInput
-    : getSubjectField();
-  if (!field) {
-    toast('Subject field not found.');
-    return;
-  }
-  subjectGeneratorInput = field;
-
-  setSubjectGeneratorBusy(true);
-
-  let mailingHTML = '';
-  try {
-    mailingHTML = await collectMailingHTML();
-  } catch {
-    mailingHTML = '';
-  }
-  if (!mailingHTML) {
-    toast('Could not capture the mailing content. Using available details only.');
-  }
-  const MAX_MAILING_CHARS = 20000;
-  let trimmedMailingHTML = mailingHTML;
-  let truncationNote = '';
-  if (trimmedMailingHTML && trimmedMailingHTML.length > MAX_MAILING_CHARS) {
-    trimmedMailingHTML = trimmedMailingHTML.slice(0, MAX_MAILING_CHARS);
-    truncationNote = `\n\nNote: Mailing HTML truncated to first ${MAX_MAILING_CHARS} characters.`;
-  }
-
-  let apiKey;
-  try {
-    apiKey = await getApiKey();
-  } catch {
-    setSubjectGeneratorBusy(false);
-    return;
-  }
-
-  const currentSubject = field.value.trim();
-  const userPrompt = `Current subject line: ${currentSubject || '(none provided yet)'}\n\nMailing HTML:\n${trimmedMailingHTML || '(not available)'}${truncationNote}`;
-
-  try {
-    const response = await openAIChat(apiKey, SUBJECT_GENERATOR_SYSTEM_PROMPT, userPrompt, 0.5);
-    let suggestion = '';
-    const parsed = safeParseJSON(response);
-    if (parsed && typeof parsed.subject === 'string') {
-      suggestion = parsed.subject.trim();
-    }
-    if (!suggestion) {
-      suggestion = (response || '').trim().replace(/^[\s"'`]+|[\s"'`]+$/g, '');
-    }
-    if (!suggestion) {
-      toast('ChatGPT did not return a subject line.');
-      return;
-    }
-
-    field.value = suggestion;
-    try { field.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* ignore */ }
-    try { field.dispatchEvent(new Event('change', { bubbles: true })); } catch { /* ignore */ }
-    toast('Subject updated.');
-  } catch (err) {
-    console.error('[Smartpr Labs][SubjectGenerator] Failed to generate subject', err);
-    toast(getOpenAIErrorMessage(err, 'Could not generate a subject line. Please try again.'));
+    console.error('[Smartpr Labs][Helper] Paragraph draft failed', err);
+    const msg = getOpenAIErrorMessage(err, 'Could not generate a paragraph.');
+    toast(msg);
   } finally {
-    setSubjectGeneratorBusy(false);
+    setBusy('paragraph', false);
   }
 }
 
-function teardownSubjectGenerator() {
-  subjectGeneratorBusy = false;
-  if (subjectGeneratorObserver) {
-    try { subjectGeneratorObserver.disconnect(); } catch { /* ignore */ }
-    subjectGeneratorObserver = null;
-  }
-  if (subjectGeneratorButton) {
-    try { subjectGeneratorButton.remove(); } catch { /* ignore */ }
-    subjectGeneratorButton = null;
-  }
-  if (subjectGeneratorInput) {
-    if (subjectGeneratorInput.dataset.sprSubjectFlexApplied) {
-      subjectGeneratorInput.style.flex = subjectGeneratorInput.dataset.sprSubjectPrevFlex || '';
-      delete subjectGeneratorInput.dataset.sprSubjectPrevFlex;
-      delete subjectGeneratorInput.dataset.sprSubjectFlexApplied;
+// ---------- Subject watching ----------
+let subjectField = null;
+
+function onSubjectInput(event) {
+  updateSubjectValue(event.target?.value || '');
+}
+
+function bindSubjectField() {
+  const field = getSubjectField();
+  if (field && field !== subjectField) {
+    if (subjectField) {
+      subjectField.removeEventListener('input', onSubjectInput);
     }
-    subjectGeneratorInput = null;
-  }
-  if (subjectGeneratorContainer) {
-    if (subjectGeneratorContainer.dataset.sprSubjectLayoutApplied) {
-      subjectGeneratorContainer.style.display = subjectGeneratorContainer.dataset.sprSubjectPrevDisplay || '';
-      subjectGeneratorContainer.style.alignItems = subjectGeneratorContainer.dataset.sprSubjectPrevAlign || '';
-      subjectGeneratorContainer.style.gap = subjectGeneratorContainer.dataset.sprSubjectPrevGap || '';
-      delete subjectGeneratorContainer.dataset.sprSubjectPrevDisplay;
-      delete subjectGeneratorContainer.dataset.sprSubjectPrevAlign;
-      delete subjectGeneratorContainer.dataset.sprSubjectPrevGap;
-      delete subjectGeneratorContainer.dataset.sprSubjectLayoutApplied;
-    }
-    subjectGeneratorContainer = null;
+    subjectField = field;
+    subjectField.addEventListener('input', onSubjectInput);
+    updateSubjectValue(subjectField.value || '');
+  } else if (!field && subjectField && !document.contains(subjectField)) {
+    subjectField.removeEventListener('input', onSubjectInput);
+    subjectField = null;
+    updateSubjectValue('');
   }
 }
 
-
-// ---------- PR Feedback Assistant ----------
-function ensurePRFeedbackPanel() {
-  if (!document.body) return null;
-  let panel = $('#spr-feedback-panel');
-  if (panel) return panel;
-
-  panel = document.createElement('div');
-  panel.id = 'spr-feedback-panel';
-  panel.innerHTML = `
-    <div class="spr-feedback-header">
-      <strong>PR Feedback</strong>
-      <button type="button" class="spr-feedback-action" data-feedback-view-input style="display:none">View input</button>
-      <button type="button" class="spr-feedback-action" data-feedback-copy style="display:none">Copy</button>
-      <button type="button" class="spr-feedback-close" data-feedback-close title="Close">✕</button>
-    </div>
-    <div id="spr-feedback-status" class="spr-feedback-status"></div>
-    <div id="spr-feedback-content" class="spr-feedback-content"></div>
-  `;
-  document.body.appendChild(panel);
-
-  const closeBtn = panel.querySelector('[data-feedback-close]');
-  if (closeBtn) closeBtn.addEventListener('click', hideFeedbackPanel);
-
-  const copyBtn = panel.querySelector('[data-feedback-copy]');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', async () => {
-      const contentEl = panel.querySelector('#spr-feedback-content');
-      const content = contentEl?.dataset?.raw ?? contentEl?.textContent ?? '';
-      if (!content.trim()) {
-        toast('Nothing to copy yet.');
-        return;
-      }
-      await copyToClipboard(content);
-      toast('Feedback copied.');
-    });
-  }
-
-  const viewInputBtn = panel.querySelector('[data-feedback-view-input]');
-  if (viewInputBtn) {
-    viewInputBtn.addEventListener('click', () => showFeedbackInputModal());
-  }
-
-  return panel;
-}
-
-function showFeedbackPanel() {
-  const panel = ensurePRFeedbackPanel();
-  if (!panel) return null;
-  panel.style.display = 'flex';
-  return panel;
-}
-
-function hideFeedbackPanel() {
-  const panel = $('#spr-feedback-panel');
-  if (panel) panel.style.display = 'none';
-}
-
-function setFeedbackPanelState(state, message = '') {
-  const panel = ensurePRFeedbackPanel();
-  if (!panel) return;
-  const statusEl = panel.querySelector('#spr-feedback-status');
-  const contentEl = panel.querySelector('#spr-feedback-content');
-  const copyBtn = panel.querySelector('[data-feedback-copy]');
-  const viewInputBtn = panel.querySelector('[data-feedback-view-input]');
-  if (!statusEl || !contentEl || !copyBtn) return;
-
-  statusEl.classList.remove('is-error');
-  if (state === 'loading') {
-    statusEl.textContent = message || 'Loading…';
-    statusEl.style.display = '';
-    contentEl.textContent = '';
-    contentEl.dataset.raw = '';
-   copyBtn.style.display = 'none';
-   if (viewInputBtn) viewInputBtn.style.display = lastFeedbackInput ? '' : 'none';
- } else if (state === 'error') {
-    statusEl.textContent = message || 'Something went wrong.';
-    statusEl.style.display = '';
-    statusEl.classList.add('is-error');
-    contentEl.textContent = '';
-    contentEl.dataset.raw = '';
-   copyBtn.style.display = 'none';
-   if (viewInputBtn) viewInputBtn.style.display = lastFeedbackInput ? '' : 'none';
- } else if (state === 'success') {
-    statusEl.textContent = '';
-    statusEl.style.display = 'none';
-    contentEl.dataset.raw = message;
-    contentEl.innerHTML = markdownToHtml(message);
-   copyBtn.style.display = '';
-   if (viewInputBtn) viewInputBtn.style.display = lastFeedbackInput ? '' : 'none';
- }
-}
-
-async function requestPRFeedback() {
-  showFeedbackPanel();
-  setFeedbackPanelState('loading', 'Collecting mailing content…');
-  logFeedback('Feedback request started');
-
-  const mailingHTML = await collectMailingHTML();
-  if (!mailingHTML) {
-    setFeedbackPanelState('error', 'Could not find the mailing content on this page.');
-    logFeedback('No mailing HTML available');
-    return;
-  }
-  logFeedback('Mailing HTML collected', { length: mailingHTML.length });
-  lastFeedbackInput = mailingHTML;
-  const viewBtn = $('#spr-feedback-panel [data-feedback-view-input]');
-  if (viewBtn) viewBtn.style.display = lastFeedbackInput ? '' : 'none';
-
-  let apiKey;
-  try {
-    apiKey = await getApiKey();
-  } catch {
-    setFeedbackPanelState('error', 'Add your OpenAI API key via the extension options to request feedback.');
-    logFeedback('API key missing');
-    return;
-  }
-
-  const userPrompt = `Here is the HTML of the mailing currently being edited in Smart.pr:\n\n${mailingHTML}`;
-
-  try {
-    setFeedbackPanelState('loading', 'Requesting PR feedback…');
-    logFeedback('Calling OpenAI for feedback');
-    const feedback = await openAIChat(apiKey, PR_FEEDBACK_SYSTEM_PROMPT, userPrompt, 0.4);
-    setFeedbackPanelState('success', feedback.trim());
-    logFeedback('Received feedback from OpenAI', { length: feedback ? feedback.length : 0 });
-  } catch (err) {
-    console.error('[SASE] PR feedback error', err);
-    const friendly = getOpenAIErrorMessage(err, 'Could not fetch PR feedback. Please try again.');
-    setFeedbackPanelState('error', friendly);
-    logFeedback('OpenAI request failed', err?.message || err);
-  }
-}
-
-async function collectMailingHTML() {
-  const PRIMARY_SELECTOR = '.publisher-mailing-html__root';
-  const secondarySelectors = [
-    '.publisher-mailings-design-bee__body',
-    '[mailing-id-selector="publisherMailingIdSelector"]',
-    '.mailing-html__iframe',
-    'publisher-mailing-html',
-    'div.stageContent',
-    'div.Stage_stageInner__M9-ST',
-    'div.Stage_stageInner',
-    'div.stageInner',
-    '.stageInner',
-    '.Stage_stageInner__M9-ST'
-  ];
-
-  const beeHtml = await requestBeeHtmlViaBridge();
-  if (beeHtml) {
-    logFeedback('Using HTML from bridge', { length: beeHtml.length });
-    return beeHtml;
-  }
-  logFeedback('Bridge did not return HTML, falling back to DOM scraping');
-
-  const primaryNodes = deepQuerySelectorAll(PRIMARY_SELECTOR).filter(Boolean);
-  if (primaryNodes.length) {
-    const htmlChunks = primaryNodes
-      .map(node => (node.outerHTML || '').trim())
-      .filter(Boolean);
-    if (htmlChunks.length) {
-      logFeedback('Collected HTML via primary selectors', { nodes: htmlChunks.length });
-      return htmlChunks.join('\n\n');
+// ---------- Feature control ----------
+function applyFeatureUpdates(partialFlags = {}) {
+  let changed = false;
+  const next = { ...featureFlags };
+  for (const key of Object.keys(partialFlags)) {
+    if (key in next && partialFlags[key] !== undefined && next[key] !== partialFlags[key]) {
+      next[key] = partialFlags[key];
+      changed = true;
     }
   }
-
-  for (const selector of secondarySelectors) {
-    const candidates = deepQuerySelectorAll(selector).filter(Boolean);
-    if (candidates.length) {
-      const htmlChunks = candidates
-        .map(node => (node.outerHTML || '').trim())
-        .filter(Boolean);
-      if (htmlChunks.length) {
-        logFeedback('Collected HTML via secondary selector', { selector, nodes: htmlChunks.length });
-        return htmlChunks.join('\n\n');
-      }
-    }
-  }
-
-  logFeedback('Failed to collect mailing HTML');
-  return '';
-}
-
-function ensurePRFeedbackButton() {
-  if (!featureFlags.prFeedback) return;
-  const buttons = $$('button.ui-button__root, button.publisher-mailings-design-bee__button');
-  const saveBtn = buttons.find(btn => (btn.textContent || '').trim().toLowerCase() === 'save as template');
-  if (!saveBtn || saveBtn.dataset.sprFeedbackAttached) return;
-  logFeedback('Injecting PR Feedback button');
-
-  const askBtn = document.createElement('button');
-  askBtn.type = 'button';
-  askBtn.className = 'publisher-mailings-design-bee__button ui-button__root ui-button__root--default ui-button__root--big spr-feedback-btn';
-  askBtn.textContent = '✨ Ask feedback';
-  askBtn.dataset.sprFeedbackBtn = '1';
-  saveBtn.insertAdjacentElement('beforebegin', askBtn);
-  saveBtn.dataset.sprFeedbackAttached = '1';
-
-  askBtn.addEventListener('click', requestPRFeedback);
-
-  const mirror = () => {
-    const disabled = saveBtn.disabled
-      || saveBtn.classList.contains('ui-button__root--disabled')
-      || saveBtn.hasAttribute('disabled')
-      || saveBtn.getAttribute('aria-disabled') === 'true';
-    askBtn.disabled = !!disabled;
-    askBtn.style.opacity = disabled ? '0.6' : '';
-    askBtn.style.pointerEvents = disabled ? 'none' : '';
-  };
-  mirror();
-
-  const observer = new MutationObserver(mirror);
-  observer.observe(saveBtn, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
-  askBtn._sprFeedbackObserver = observer;
-}
-
-function teardownPRFeedback() {
-  const panel = $('#spr-feedback-panel');
-  if (panel) panel.remove();
-  $$('.spr-feedback-btn').forEach(btn => {
-    if (btn._sprFeedbackObserver) {
-      try { btn._sprFeedbackObserver.disconnect(); } catch { /* ignore */ }
-      delete btn._sprFeedbackObserver;
-    }
-    btn.remove();
-  });
-  $$('[data-spr-feedback-attached]').forEach(btn => {
-    btn.removeAttribute('data-spr-feedback-attached');
-  });
-  hideFeedbackPanel();
-}
-
-function teardownAllFeatures() {
-  teardownAngleAssistant();
-  teardownPRFeedback();
-  teardownParagraphWriter();
-  teardownSubjectGenerator();
-}
-
-// Initial injection & observe SPA updates
-function runInjections() {
-  if (!featuresReady) return;
-
-  if (extensionDisabled) {
-    teardownAllFeatures();
-    return;
-  }
-
-  if (featureFlags.angleAssistant) {
-    ensureInjected();
-  } else {
-    teardownAngleAssistant();
-  }
-
-  if (featureFlags.subjectGenerator) {
-    ensureSubjectGeneratorButton();
-  } else {
-    teardownSubjectGenerator();
-  }
-
-  if (featureFlags.prFeedback) {
-    ensurePRFeedbackButton();
-    logFeedback('Ran injection pass');
-  } else {
-    teardownPRFeedback();
-  }
-
+  if (!changed) return;
+  featureFlags = next;
   if (featureFlags.paragraphWriter) {
-    initParagraphWriter();
-  } else {
-    teardownParagraphWriter();
+    injectBeeBridge();
   }
+  refreshHelperUI();
+  updateHelperVisibility();
 }
 
-let injectionObserver = null;
+let pageObserver = null;
 
-async function initFeatures() {
+async function initHelper() {
   await loadFeatureFlags();
-  runInjections();
-  if (!injectionObserver) {
-    injectionObserver = new MutationObserver(runInjections);
-    injectionObserver.observe(document.documentElement, { childList: true, subtree: true });
+  await loadNudgeHistory();
+  refreshMailingContext();
+  ensureHelperShell();
+  refreshHelperUI();
+  updateHelperVisibility();
+  bindSubjectField();
+  scheduleMailingCheck();
+  if (featureFlags.paragraphWriter) {
+    injectBeeBridge();
+  }
+
+  if (!pageObserver) {
+    pageObserver = new MutationObserver(() => {
+      bindSubjectField();
+      refreshMailingContext();
+      scheduleMailingCheck();
+    });
+    pageObserver.observe(document.documentElement, { childList: true, subtree: true });
   }
 }
 
-initFeatures();
+initHelper();
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'sync') return;
@@ -1804,34 +1430,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
     const nextDisabled = Boolean(changes[LABS_DISABLED_KEY].newValue);
     if (nextDisabled !== extensionDisabled) {
       extensionDisabled = nextDisabled;
-      if (extensionDisabled) {
-        teardownAllFeatures();
-      }
-      runInjections();
+      updateHelperVisibility();
     }
   }
   applyFeatureUpdates(updates);
 });
-
-// Prefill modal subject whenever subject input changes
-(function watchSubjectField() {
-  const subj = getSubjectField();
-  if (!subj) return;
-  subj.addEventListener('input', () => {
-    const modalSubj = $('#sase-subject');
-    if (modalSubj && $('#sase-modal')?.style.display !== 'none') {
-      modalSubj.value = subj.value;
-    }
-  });
-})();
-
-(function watchSenderField() {
-  const sender = getSenderField();
-  if (!sender) return;
-  sender.addEventListener('input', () => {
-    const modalSender = $('#sase-sender');
-    if (modalSender && $('#sase-modal')?.style.display !== 'none') {
-      modalSender.value = sender.value;
-    }
-  });
-})();

@@ -44,7 +44,7 @@
 ,
   "web_accessible_resources": [
     {
-      "resources": ["page-bridge.js"],
+      "resources": ["page-bridge.js", "icon.png"],
       "matches": ["https://smart.pr/*", "https://*.smart.pr/*", "https://dontest.smart.pr/*"]
     }
   ]
