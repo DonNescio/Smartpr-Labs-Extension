@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Smart.pr Labs",
+  "name": "Smart.pr Assistant",
   "version": "0.3.0",
   "description": "Smart.pr Labs – includes the Angle Assistant to suggest newsworthy story angles inside Smart.pr.",
   "permissions": ["storage", "activeTab", "scripting"],
@@ -9,9 +9,9 @@
     "https://app.getbee.io/*"
   ],
   "icons": {
-    "16": "icon.png",
-    "48": "icon.png",
-    "128": "icon.png"
+    "16": "app-icon.png",
+    "48": "app-icon.png",
+    "128": "app-icon.png"
   },
   "background": {
   "service_worker": "background.js"
@@ -44,7 +44,7 @@
 ,
   "web_accessible_resources": [
     {
-      "resources": ["page-bridge.js", "icon.png"],
+      "resources": ["page-bridge.js", "app-icon.png"],
       "matches": ["https://smart.pr/*", "https://*.smart.pr/*", "https://dontest.smart.pr/*"]
     }
   ]

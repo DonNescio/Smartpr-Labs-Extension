@@ -90,9 +90,13 @@ Get feedback on a subject line using OpenAI.
 ```json
 {
   "email": "user@company.com",
-  "subject": "Current subject line to analyze"
+  "subject": "Current subject line to analyze",
+  "context": {
+    "keepLanguage": true
+  }
 }
 ```
+`context` is optional; `keepLanguage` enforces same-language responses.
 
 **Success Response (200):**
 ```json
@@ -271,6 +275,7 @@ Analyze the subject line for:
 5. Potential improvements
 
 Provide specific, actionable feedback in a friendly tone.
+Respond in the same language as the subject line. Do not translate.
 ```
 
 ## User Management (`data/users.json`)

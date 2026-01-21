@@ -7,6 +7,8 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 // Note: storage is defined in api-client.js which loads first
 // We can use the storage object from api-client.js
 
+const EXTENSION_DISABLED_KEY = 'smartpr_helper_disabled';
+
 // ========== State ==========
 let floatingIcon = null;
 let sidebar = null;
@@ -15,6 +17,9 @@ let subjectField = null;
 let subjectFieldObserver = null;
 let lastSubjectValue = '';
 let userEmail = '';
+let extensionDisabled = false;
+let subjectListenersAttached = false;
+let subjectWatchTimer = null;
 
 // ========== Subject Field Detection ==========
 function findSubjectField() {
@@ -35,26 +40,31 @@ function findSubjectField() {
 }
 
 function watchSubjectField() {
+  if (extensionDisabled) return;
   subjectField = findSubjectField();
 
   if (!subjectField) {
-    setTimeout(watchSubjectField, 1000);
+    subjectWatchTimer = setTimeout(watchSubjectField, 1000);
     return;
   }
 
   console.log('[Smart.pr Helper] Subject field found');
 
   // Watch for focus
-  subjectField.addEventListener('focus', handleSubjectFocus);
+  if (!subjectListenersAttached) {
+    subjectField.addEventListener('focus', handleSubjectFocus);
 
-  // Watch for value changes
-  subjectField.addEventListener('input', handleSubjectInput);
+    // Watch for value changes
+    subjectField.addEventListener('input', handleSubjectInput);
+    subjectListenersAttached = true;
+  }
 
   // Initial check
   lastSubjectValue = subjectField.value;
 }
 
 function handleSubjectFocus() {
+  if (extensionDisabled) return;
   const currentValue = subjectField.value.trim();
 
   // Don't show nudge if sidebar is already open
@@ -71,6 +81,7 @@ function handleSubjectFocus() {
 }
 
 function handleSubjectInput() {
+  if (extensionDisabled) return;
   const newValue = subjectField.value;
 
   // If value changed significantly, hide any existing nudge
@@ -83,6 +94,7 @@ function handleSubjectInput() {
 
 // ========== Nudge System ==========
 function showNudge(message, type) {
+  if (extensionDisabled) return;
   // Don't show if already showing
   if (currentNudge) return;
 
@@ -135,6 +147,7 @@ function hideNudge() {
 
 // ========== Floating Icon ==========
 function createFloatingIcon() {
+  if (extensionDisabled) return null;
   floatingIcon = document.createElement('div');
   floatingIcon.id = 'smartpr-helper-icon';
 
@@ -211,6 +224,7 @@ function createSidebar() {
 }
 
 function openSidebar(type) {
+  if (extensionDisabled) return;
   if (!sidebar) {
     createSidebar();
   }
@@ -230,6 +244,7 @@ function openSidebar(type) {
 }
 
 function openSidebarFromIcon() {
+  if (extensionDisabled) return;
   // When opened from floating icon (not from nudge), detect context
   const currentValue = subjectField ? subjectField.value.trim() : '';
 
@@ -248,6 +263,7 @@ function closeSidebar() {
 }
 
 function showEmptyState() {
+  if (extensionDisabled) return;
   const content = $('#sph-content');
   content.innerHTML = `
     <div class="sph-section">
@@ -290,6 +306,7 @@ function showEmptyState() {
 }
 
 function showFilledState(currentSubject) {
+  if (extensionDisabled) return;
   const content = $('#sph-content');
   content.innerHTML = `
     <div class="sph-section">
@@ -438,26 +455,32 @@ Return ONLY valid JSON in this exact format:
 No additional text or explanation.`;
 
 async function generateSubjectSuggestions(currentSubject = '', prDescription = '') {
+  if (extensionDisabled) return;
   try {
     showLoadingState('Generating subject line suggestions...');
 
     let userPrompt = '';
+    const languageInstruction = currentSubject
+      ? 'All output must stay in the same language as the subject line. Do not translate.'
+      : prDescription
+        ? 'Write all output in the same language as the description. Do not translate.'
+        : '';
+    const languageSuffix = languageInstruction ? `\n\n${languageInstruction}` : '';
 
     if (currentSubject) {
       // Improving an existing subject
-      userPrompt = `Generate improved alternatives for this subject line:\n\n"${currentSubject}"\n\nProvide 3-5 alternatives that are more compelling.`;
+      userPrompt = `Generate improved alternatives for this subject line:\n\n"${currentSubject}"\n\nProvide 3-5 alternatives that are more compelling.${languageSuffix}`;
     } else if (prDescription) {
       // Generating from description
-      userPrompt = `Generate 3-5 compelling subject lines for a press release about:\n\n${prDescription}\n\nMake them professional, newsworthy, and engaging.`;
+      userPrompt = `Generate 3-5 compelling subject lines for a press release about:\n\n${prDescription}\n\nMake them professional, newsworthy, and engaging.${languageSuffix}`;
     } else {
       // Generic generation (fallback)
-      userPrompt = `Generate 3-5 compelling subject lines for a press release email. Make them professional, newsworthy, and engaging.`;
+      userPrompt = `Generate 3-5 compelling subject lines for a press release email. Make them professional, newsworthy, and engaging.${languageSuffix}`;
     }
 
     // Call proxy API via API client
     const result = await window.SmartPRAPI.generateSubjectLines(userPrompt, {
-      currentSubject: currentSubject || undefined,
-      language: 'auto' // Let AI detect language
+      currentSubject: currentSubject || undefined
     });
 
     showSuggestions(result.subjects, currentSubject);
@@ -516,11 +539,14 @@ Keep your feedback concise (2-4 short bullet points) and actionable. Detect the 
 Format as plain text with bullet points.`;
 
 async function getFeedback(subject) {
+  if (extensionDisabled) return;
   try {
     showLoadingState('Analyzing your subject line...');
 
     // Call proxy API via API client
-    const result = await window.SmartPRAPI.getSubjectFeedback(subject);
+    const result = await window.SmartPRAPI.getSubjectFeedback(subject, {
+      keepLanguage: true
+    });
 
     // Display feedback
     const content = $('#sph-content');
@@ -531,7 +557,7 @@ async function getFeedback(subject) {
       </div>
       <div class="sph-section">
         <span class="sph-label">Feedback</span>
-        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; font-size: 14px; line-height: 1.6; color: #374151; white-space: pre-wrap;">${escapeHTML(result.feedback)}</div>
+        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; font-size: 14px; line-height: 1.6; color: #374151;">${renderFeedbackMarkup(result.feedback)}</div>
       </div>
       <div class="sph-section">
         <button class="sph-button" id="generate-alternatives-btn">
@@ -574,7 +600,46 @@ function escapeHTML(str) {
   return div.innerHTML;
 }
 
+function renderFeedbackMarkup(text) {
+  if (!text) return '';
+  const escaped = escapeHTML(text);
+  const lines = escaped.split(/\r?\n/);
+  const parts = [];
+  let inList = false;
+
+  const closeList = () => {
+    if (!inList) return;
+    parts.push('</ol>');
+    inList = false;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+    if (orderedMatch) {
+      if (!inList) {
+        parts.push('<ol>');
+        inList = true;
+      }
+      parts.push(`<li>${orderedMatch[1]}</li>`);
+      continue;
+    }
+    closeList();
+    parts.push(`<p>${trimmed}</p>`);
+  }
+
+  closeList();
+
+  return parts.join('')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
 async function copyToClipboard(text) {
+  if (extensionDisabled) return;
   try {
     await navigator.clipboard.writeText(text);
     showToast('✓ Copied to clipboard');
@@ -593,6 +658,7 @@ async function copyToClipboard(text) {
 }
 
 function showToast(message) {
+  if (extensionDisabled) return;
   const toast = document.createElement('div');
   toast.className = 'sph-toast';
   toast.textContent = message;
@@ -604,14 +670,56 @@ function showToast(message) {
 }
 
 // ========== Initialization ==========
+function detachSubjectListeners() {
+  if (subjectField && subjectListenersAttached) {
+    subjectField.removeEventListener('focus', handleSubjectFocus);
+    subjectField.removeEventListener('input', handleSubjectInput);
+    subjectListenersAttached = false;
+  }
+}
+
+function teardownExtensionUI() {
+  hideNudge();
+  closeSidebar();
+  if (sidebar) {
+    sidebar.remove();
+    sidebar = null;
+  }
+  if (floatingIcon) {
+    floatingIcon.remove();
+    floatingIcon = null;
+  }
+  detachSubjectListeners();
+  if (subjectWatchTimer) {
+    clearTimeout(subjectWatchTimer);
+    subjectWatchTimer = null;
+  }
+}
+
+function applyExtensionState(disabled) {
+  extensionDisabled = Boolean(disabled);
+  if (extensionDisabled) {
+    teardownExtensionUI();
+    return;
+  }
+  if (!floatingIcon) {
+    createFloatingIcon();
+  }
+  watchSubjectField();
+}
+
 function init() {
   console.log('[Smart.pr Helper] Initializing...');
+  chrome.storage.sync.get([EXTENSION_DISABLED_KEY], (result) => {
+    applyExtensionState(Boolean(result[EXTENSION_DISABLED_KEY]));
+  });
 
-  // Create floating icon immediately
-  createFloatingIcon();
-
-  // Watch for subject field
-  watchSubjectField();
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    if (EXTENSION_DISABLED_KEY in changes) {
+      applyExtensionState(Boolean(changes[EXTENSION_DISABLED_KEY].newValue));
+    }
+  });
 }
 
 // Start when DOM is ready

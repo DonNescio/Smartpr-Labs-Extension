@@ -24,6 +24,7 @@ const ERROR_MESSAGES = {
   OPENAI_ERROR: 'Our AI service encountered an error. Please try again.',
   SERVER_ERROR: 'Our service is temporarily unavailable. Please try again in a moment.',
   NETWORK_ERROR: 'Connection failed. Please check your internet connection.',
+  EXTENSION_CONTEXT_INVALIDATED: 'Extension updated. Refresh the page to continue.',
   INVALID_REQUEST: 'Invalid request. Please try again.',
   UNKNOWN_ERROR: 'An unexpected error occurred. Please try again.'
 };
@@ -104,6 +105,13 @@ async function callProxyAPI(endpoint, payload) {
     return data;
 
   } catch (error) {
+    if (error && typeof error.message === 'string' && error.message.includes('Extension context invalidated')) {
+      throw {
+        code: 'EXTENSION_CONTEXT_INVALIDATED',
+        message: ERROR_MESSAGES.EXTENSION_CONTEXT_INVALIDATED,
+        originalError: error
+      };
+    }
     // Network errors (fetch failed)
     if (error instanceof TypeError && error.message.includes('fetch')) {
       throw {
@@ -162,13 +170,16 @@ async function generateSubjectLines(userPrompt, context = {}) {
 /**
  * Get feedback on a subject line
  * @param {string} subjectLine - The subject line to analyze
+ * @param {object} context - Optional context (e.g., { keepLanguage: true })
  * @returns {Promise<string>} - Feedback text
  */
-async function getSubjectFeedback(subjectLine) {
+async function getSubjectFeedback(subjectLine, context = undefined) {
   try {
-    const response = await callProxyAPI('/feedback-subject', {
-      subject: subjectLine
-    });
+    const payload = { subject: subjectLine };
+    if (context && Object.keys(context).length) {
+      payload.context = context;
+    }
+    const response = await callProxyAPI('/feedback-subject', payload);
 
     if (!response.success || !response.feedback) {
       throw {

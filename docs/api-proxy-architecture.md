@@ -314,9 +314,13 @@ async function validateUser(email) {
 ```json
 {
   "email": "user@company.com",
-  "subject": "Current subject line to analyze"
+  "subject": "Current subject line to analyze",
+  "context": {
+    "keepLanguage": true
+  }
 }
 ```
+`context` is optional; `keepLanguage` enforces same-language responses.
 
 **Response:**
 ```json
@@ -376,6 +380,7 @@ async function generateFeedback(systemPrompt, userPrompt) {
   // Call OpenAI Chat Completions API
   // Model: gpt-4o-mini
   // Temperature: 0.7
+  // Keep output in the same language as the subject line
   // Return feedback text
 }
 ```
@@ -601,4 +606,3 @@ Once deployed:
 - **Health Check**: GET /health
 - **Admin Access**: [Define how admins authenticate]
 - **Logs**: Available in Replit dashboard
-

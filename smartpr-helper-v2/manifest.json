@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Smart.pr Helper",
+  "name": "Smart.pr Assistant",
   "version": "1.0.0",
   "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
   "permissions": ["storage", "activeTab"],
@@ -8,13 +8,13 @@
     "https://*.repl.co/*"
   ],
   "icons": {
-    "16": "icon.png",
-    "48": "icon.png",
-    "128": "icon.png"
+    "16": "app-icon.png",
+    "48": "app-icon.png",
+    "128": "app-icon.png"
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Smart.pr Helper"
+    "default_title": "Smart.pr Assistant"
   },
   "options_page": "options.html",
   "content_scripts": [

@@ -678,7 +678,7 @@ function ensureHelperShell() {
   helperEls.emptyState = $('#spr-helper-empty-state', root);
 
   const icon = root.querySelector('.spr-helper-icon');
-  if (icon) icon.src = chrome.runtime.getURL('icon.png');
+  if (icon) icon.src = chrome.runtime.getURL('app-icon.png');
 
   helperEls.cards = {
     subject: {

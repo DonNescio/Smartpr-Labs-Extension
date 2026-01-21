@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Smart.pr Helper</title>
+  <title>Smart.pr Assistant</title>
   <style>
     * {
       margin: 0;
@@ -79,10 +79,102 @@
       border-color: #fecaca;
       color: #991b1b;
     }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .header img {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      background: #ffffff;
+      margin-bottom: 16px;
+    }
+
+    .toggle-row strong {
+      display: block;
+      font-size: 13px;
+      color: #111827;
+    }
+
+    .toggle-row span {
+      display: block;
+      font-size: 12px;
+      color: #6b7280;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #d1d5db;
+      transition: 0.2s;
+      border-radius: 999px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.2s;
+      border-radius: 999px;
+    }
+
+    .switch input:checked + .slider {
+      background-color: #10b981;
+    }
+
+    .switch input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+
+    .toggle-status {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 16px;
+    }
   </style>
 </head>
 <body>
-  <h1>Smart.pr Helper</h1>
+  <div class="header">
+    <img src="app-icon.png" alt="Smart.pr Assistant">
+    <h1>Smart.pr Assistant</h1>
+  </div>
 
   <div class="status" id="status">
     Checking configuration...
@@ -90,11 +182,23 @@
 
   <p>AI-powered assistant to help you write better subject lines and content for Smart.pr.</p>
 
+  <div class="toggle-row">
+    <div>
+      <strong>Extension</strong>
+      <span>Hide the bubble and prompts.</span>
+    </div>
+    <label class="switch" aria-label="Toggle Smart.pr Assistant">
+      <input type="checkbox" id="toggle-extension" checked />
+      <span class="slider"></span>
+    </label>
+  </div>
+  <div class="toggle-status" id="extension-status">Extension is on.</div>
+
   <button class="button" id="open-options">Open Settings</button>
 
   <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
     <p style="font-size: 12px; color: #9ca3af; margin-bottom: 0;">
-      Visit any Smart.pr page to use the helper
+      Visit any Smart.pr page to use the assistant
     </p>
   </div>
 
