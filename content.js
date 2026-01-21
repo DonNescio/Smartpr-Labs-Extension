@@ -549,6 +549,10 @@ const helperState = {
   mailingReady: false,
   mailingCheckTimer: null,
   mailingCheckInFlight: false,
+  bubbleMode: 'nudge',
+  postCopyPending: false,
+  postCopyMessage: '',
+  postCopyTimer: null,
   results: {
     subject: [],
     angles: [],
@@ -574,6 +578,8 @@ const helperEls = {
   bubbleText: null,
   bubbleDismiss: null,
   panel: null,
+  panelTitle: null,
+  panelSubtitle: null,
   close: null,
   emptyState: null,
   cards: {},
@@ -603,43 +609,37 @@ function ensureHelperShell() {
       </button>
     </div>
     <div class="spr-helper-panel" id="spr-helper-panel" aria-hidden="true">
-      <div class="spr-helper-panel-header">
-        <div>
-          <div class="spr-helper-panel-title">Smart.pr Helper</div>
-          <div class="spr-helper-panel-subtitle">Quiet until needed</div>
+      <div class="spr-helper-panel-top">
+        <div class="spr-helper-panel-brand">
+          <span class="spr-helper-panel-brand-mark">Smart.pr Helper</span>
         </div>
-        <button type="button" class="spr-helper-icon-button" id="spr-helper-close" aria-label="Close">x</button>
+        <button type="button" class="spr-helper-icon-button" id="spr-helper-close" aria-label="Close">Close</button>
+      </div>
+      <div class="spr-helper-panel-hero">
+        <div class="spr-helper-panel-title" id="spr-helper-panel-title">Ideas on standby</div>
+        <div class="spr-helper-panel-subtitle" id="spr-helper-panel-subtitle">Open a mailing or add a subject line.</div>
       </div>
       <div class="spr-helper-panel-body">
         <div class="spr-helper-empty-state" id="spr-helper-empty-state">
           Nothing to help with yet. Add a subject line or open a mailing.
         </div>
         <div class="spr-helper-card" data-card="subject">
-          <div class="spr-helper-card-header">
-            <div>
-              <div class="spr-helper-card-title">Subject suggestions</div>
-              <div class="spr-helper-card-status" id="spr-helper-subject-status">Waiting for subject line</div>
-            </div>
+          <div class="spr-helper-card-top">
+            <div class="spr-helper-card-status" id="spr-helper-subject-status">Waiting for subject line</div>
             <button type="button" class="spr-helper-btn" data-action="subject-generate">Generate</button>
           </div>
           <div class="spr-helper-card-body" id="spr-helper-subject-body"></div>
         </div>
         <div class="spr-helper-card" data-card="angles">
-          <div class="spr-helper-card-header">
-            <div>
-              <div class="spr-helper-card-title">Angle ideas</div>
-              <div class="spr-helper-card-status" id="spr-helper-angles-status">Waiting for subject line</div>
-            </div>
+          <div class="spr-helper-card-top">
+            <div class="spr-helper-card-status" id="spr-helper-angles-status">Waiting for subject line</div>
             <button type="button" class="spr-helper-btn" data-action="angles-generate">Generate</button>
           </div>
           <div class="spr-helper-card-body" id="spr-helper-angles-body"></div>
         </div>
         <div class="spr-helper-card" data-card="feedback">
-          <div class="spr-helper-card-header">
-            <div>
-              <div class="spr-helper-card-title">PR feedback</div>
-              <div class="spr-helper-card-status" id="spr-helper-feedback-status">Open a mailing to enable</div>
-            </div>
+          <div class="spr-helper-card-top">
+            <div class="spr-helper-card-status" id="spr-helper-feedback-status">Open a mailing to enable</div>
             <button type="button" class="spr-helper-btn" data-action="feedback-generate">Generate</button>
           </div>
           <div class="spr-helper-card-body" id="spr-helper-feedback-body"></div>
@@ -648,11 +648,8 @@ function ensureHelperShell() {
           </div>
         </div>
         <div class="spr-helper-card" data-card="paragraph">
-          <div class="spr-helper-card-header">
-            <div>
-              <div class="spr-helper-card-title">Paragraph draft</div>
-              <div class="spr-helper-card-status" id="spr-helper-paragraph-status">Place cursor in empty paragraph</div>
-            </div>
+          <div class="spr-helper-card-top">
+            <div class="spr-helper-card-status" id="spr-helper-paragraph-status">Place cursor in empty paragraph</div>
             <button type="button" class="spr-helper-btn" data-action="paragraph-generate">Generate</button>
           </div>
           <div class="spr-helper-card-body" id="spr-helper-paragraph-body"></div>
@@ -675,6 +672,8 @@ function ensureHelperShell() {
   helperEls.bubbleText = $('#spr-helper-bubble-text', root);
   helperEls.bubbleDismiss = $('#spr-helper-bubble-dismiss', root);
   helperEls.panel = $('#spr-helper-panel', root);
+  helperEls.panelTitle = $('#spr-helper-panel-title', root);
+  helperEls.panelSubtitle = $('#spr-helper-panel-subtitle', root);
   helperEls.close = $('#spr-helper-close', root);
   helperEls.emptyState = $('#spr-helper-empty-state', root);
 
@@ -729,10 +728,20 @@ function bindHelperEvents() {
   }
 
   if (helperEls.bubble) {
-    helperEls.bubble.addEventListener('click', () => startNudgeFlow());
+    helperEls.bubble.addEventListener('click', () => {
+      if (helperState.bubbleMode === 'confirm') {
+        dismissConfirmBubble();
+        return;
+      }
+      startNudgeFlow();
+    });
     helperEls.bubble.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
+        if (helperState.bubbleMode === 'confirm') {
+          dismissConfirmBubble();
+          return;
+        }
         startNudgeFlow();
       }
     });
@@ -748,6 +757,10 @@ function bindHelperEvents() {
   if (helperEls.bubbleDismiss) {
     helperEls.bubbleDismiss.addEventListener('click', (event) => {
       event.stopPropagation();
+      if (helperState.bubbleMode === 'confirm') {
+        dismissConfirmBubble();
+        return;
+      }
       dismissNudge();
     });
   }
@@ -786,6 +799,7 @@ function bindHelperEvents() {
     helperEls.cards.feedback.copy.addEventListener('click', async () => {
       if (!helperState.results.feedback) return;
       await copyToClipboard(helperState.results.feedback);
+      noteCopyAction('All set. Paste it in.', { markNudgeUsed: false });
       toast('Feedback copied.');
     });
   }
@@ -793,6 +807,7 @@ function bindHelperEvents() {
     helperEls.cards.paragraph.copy.addEventListener('click', async () => {
       if (!helperState.results.paragraph) return;
       await copyToClipboard(helperState.results.paragraph);
+      noteCopyAction('All set. Paste it in.', { markNudgeUsed: false });
       toast('Paragraph copied.');
     });
   }
@@ -821,6 +836,17 @@ function closeHelperPanel() {
   helperEls.panel.style.display = 'none';
   helperEls.panel.setAttribute('aria-hidden', 'true');
   helperEls.root.classList.remove('is-open');
+  if (helperState.postCopyPending) {
+    if (!extensionDisabled && anyFeatureEnabled()) {
+      const message = helperState.postCopyMessage || 'All set. Paste it in.';
+      helperState.postCopyPending = false;
+      helperState.postCopyMessage = '';
+      showConfirmBubble(message);
+      return;
+    }
+    helperState.postCopyPending = false;
+    helperState.postCopyMessage = '';
+  }
   maybeShowNudge();
 }
 
@@ -850,7 +876,43 @@ function setCardBody(cardKey, contentNode) {
   if (contentNode) body.appendChild(contentNode);
 }
 
-function renderListItems(items, label) {
+function updatePanelHeading(activeContext) {
+  if (!helperEls.panelTitle || !helperEls.panelSubtitle) return;
+  const copy = {
+    subject: {
+      title: 'Subject line options',
+      subtitle: 'Pick one or generate a fresh set.',
+    },
+    angles: {
+      title: 'Angle ideas',
+      subtitle: 'Quick hooks based on the subject.',
+    },
+    feedback: {
+      title: 'PR feedback',
+      subtitle: 'Notes based on the mailing content.',
+    },
+    paragraph: {
+      title: 'Paragraph draft',
+      subtitle: 'A ready-to-paste paragraph.',
+    },
+    idle: {
+      title: 'Ready when you are',
+      subtitle: 'Add a subject line or open a mailing.',
+    },
+  };
+  const next = copy[activeContext] || copy.idle;
+  helperEls.panelTitle.textContent = next.title;
+  helperEls.panelSubtitle.textContent = next.subtitle;
+}
+
+function noteCopyAction(message, { markNudgeUsed = false } = {}) {
+  helperState.postCopyPending = true;
+  helperState.postCopyMessage = message;
+  helperState.nudgeDismissedUntil = Date.now() + (10 * 60 * 1000);
+  if (markNudgeUsed) recordNudgeUsed('subject');
+}
+
+function renderListItems(items, label, markNudgeUsed = false) {
   const wrap = document.createElement('div');
   wrap.className = 'spr-helper-list';
 
@@ -876,6 +938,7 @@ function renderListItems(items, label) {
     btn.textContent = 'Copy';
     btn.addEventListener('click', async () => {
       await copyToClipboard(text);
+      noteCopyAction('All set. Paste it in.', { markNudgeUsed });
       toast(`${label} copied.`);
     });
 
@@ -932,6 +995,8 @@ function refreshHelperUI() {
   const mailingReady = !!helperState.mailingReady;
   const activeContext = helperState.activeContext || chooseHelperContext();
 
+  updatePanelHeading(activeContext);
+
   const showSubject = featureFlags.subjectGenerator && subjectReady && activeContext === 'subject';
   const showAngles = featureFlags.angleAssistant && subjectReady && activeContext === 'angles';
   const showFeedback = featureFlags.prFeedback && mailingReady && activeContext === 'feedback';
@@ -967,10 +1032,10 @@ function refreshHelperUI() {
 
   updateCardStatuses();
 
-  const subjectList = renderListItems(helperState.results.subject, 'subject line');
+  const subjectList = renderListItems(helperState.results.subject, 'subject line', true);
   setCardBody('subject', subjectList);
 
-  const angleList = renderListItems(helperState.results.angles, 'angle');
+  const angleList = renderListItems(helperState.results.angles, 'angle', true);
   setCardBody('angles', angleList);
 
   const feedbackNode = renderFeedbackContent(helperState.results.feedback);
@@ -996,6 +1061,7 @@ function dismissNudge() {
 const NUDGE_DELAY_MS = 650;
 const NUDGE_PROMPT_COOLDOWN_MS = 20 * 60 * 1000;
 const NUDGE_USED_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const POST_COPY_BUBBLE_MS = 6500;
 
 async function loadNudgeHistory() {
   helperState.nudgeHistory = await localStore.get(NUDGE_HISTORY_KEY, {});
@@ -1058,6 +1124,12 @@ function shouldShowNudge() {
 
 function showNudge(text) {
   if (!helperEls.bubble || !helperEls.bubbleText) return;
+  helperState.bubbleMode = 'nudge';
+  helperEls.bubble.classList.remove('is-confirm');
+  if (helperState.postCopyTimer) {
+    clearTimeout(helperState.postCopyTimer);
+    helperState.postCopyTimer = null;
+  }
   helperEls.bubbleText.textContent = text;
   helperEls.bubble.style.display = 'flex';
   if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
@@ -1066,11 +1138,43 @@ function showNudge(text) {
   recordNudgePrompt('subject');
 }
 
+function showConfirmBubble(text) {
+  if (!helperEls.bubble || !helperEls.bubbleText) return;
+  helperState.bubbleMode = 'confirm';
+  helperEls.bubble.classList.add('is-confirm');
+  helperEls.bubbleText.textContent = text;
+  helperEls.bubble.style.display = 'flex';
+  if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
+  if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'none';
+  if (helperEls.bubbles) helperEls.bubbles.style.display = 'flex';
+  if (helperState.postCopyTimer) clearTimeout(helperState.postCopyTimer);
+  helperState.postCopyTimer = setTimeout(() => {
+    helperState.postCopyTimer = null;
+    if (helperState.bubbleMode === 'confirm') {
+      dismissConfirmBubble({ showNudge: true });
+    }
+  }, POST_COPY_BUBBLE_MS);
+}
+
+function dismissConfirmBubble({ showNudge: shouldShowNudge = true } = {}) {
+  helperState.bubbleMode = 'nudge';
+  helperState.postCopyPending = false;
+  helperState.postCopyMessage = '';
+  hideNudge();
+  if (shouldShowNudge) maybeShowNudge();
+}
+
 function hideNudge() {
   if (helperState.nudgeTimer) {
     clearTimeout(helperState.nudgeTimer);
     helperState.nudgeTimer = null;
   }
+  if (helperState.postCopyTimer) {
+    clearTimeout(helperState.postCopyTimer);
+    helperState.postCopyTimer = null;
+  }
+  helperState.bubbleMode = 'nudge';
+  if (helperEls.bubble) helperEls.bubble.classList.remove('is-confirm');
   if (helperEls.bubble) helperEls.bubble.style.display = 'none';
   if (helperEls.bubbleThinking) helperEls.bubbleThinking.style.display = 'none';
   if (helperEls.bubbleIdeas) helperEls.bubbleIdeas.style.display = 'none';
@@ -1090,6 +1194,7 @@ function scheduleNudge(text) {
 }
 
 function maybeShowNudge() {
+  if (helperState.bubbleMode === 'confirm') return;
   if (!shouldShowNudge()) {
     hideNudge();
     return;

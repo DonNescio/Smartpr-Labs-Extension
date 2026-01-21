@@ -60,6 +60,47 @@ Turn the extension into a modern, fluent, floating helper that appears on any `*
 - Requests are sent to ChatGPT using the existing OpenAI helper.
 - Responses are displayed in the helper panel with copy actions.
 
+## Selector guide (where to find target elements)
+This is the map of "where we read data" plus how to verify the selectors in the browser when Smart.pr changes its UI.
+
+### Subject line input
+- Code location: `content.js` uses `getSubjectField()`.
+- Current selectors (ordered):
+  - `input[placeholder="Please type your subject"]`
+  - `input[name="subject"]`
+  - `input[aria-label="Subject"]`
+- How to validate:
+  - Open DevTools on a Smart.pr mailing edit page.
+  - In the Elements panel, click the subject input and confirm one of the attributes above.
+  - In the Console, run `document.querySelector('input[name="subject"]')` (or one of the selectors) to confirm it returns the input.
+- If it changes:
+  - Prefer stable attributes (`name`, `aria-label`, `data-testid`) over CSS classes.
+  - Update the selector list in `getSubjectField()` to keep the selector narrow and unambiguous.
+
+### Mailing HTML (used for feedback + paragraph writer, and available for angles)
+- Code location: `content.js` uses `collectMailingHTML()`; `page-bridge.js` handles Bee API and fallbacks.
+- Primary strategy (no selector needed):
+  - `page-bridge.js` captures the Bee editor API (`getHtml`, `getTemplate`, `exportHtml`, etc.).
+  - If that API is available, we pull HTML directly from the editor.
+- Fallback selectors (used when the API is not reachable):
+  - Primary: `.publisher-mailing-html__root`
+  - Secondary list (also in `content.js`): `.publisher-mailings-design-bee__body`, `[mailing-id-selector="publisherMailingIdSelector"]`, `.mailing-html__iframe`, `publisher-mailing-html`, `div.stageContent`, `div.Stage_stageInner__M9-ST`, `div.Stage_stageInner`, `div.stageInner`, `.stageInner`, `.Stage_stageInner__M9-ST`
+  - These selectors are queried via `deepQuerySelectorAll()` which walks shadow DOM and same-origin iframes.
+- Additional fallbacks in `page-bridge.js`:
+  - Angular scope: look for `publisher-mailing-html` or `.publisher-mailing-html__root` and read `html`, `previewHtml`, `mailingHtml`, or `templateHtml` from the scope.
+  - Preview iframe: `.publisher-mailing-html__root iframe.mailing-html__iframe` (or any iframe inside `.publisher-mailing-html__root`).
+- How to validate:
+  - In Elements, search for `.publisher-mailing-html__root` or `publisher-mailing-html`.
+  - Expand the element and look for an iframe; if it exists, confirm the iframe is same-origin and has HTML.
+  - If you cannot see HTML in the DOM, the Bee API path is likely required, so verify the editor globals in `page-bridge.js`.
+- If it changes:
+  - Update `MAILING_PRIMARY_SELECTOR` / `MAILING_SECONDARY_SELECTORS` in `content.js`.
+  - If Smart.pr changes how it registers Bee APIs, update the capture logic in `page-bridge.js` (global register functions and Angular callbacks).
+
+### Angle suggestions note
+- The current angle assistant uses only the subject line (no mailing HTML in the prompt).
+- If we decide to include mailing HTML for angles, it should use the same `collectMailingHTML()` path described above.
+
 ## Plan of action (based on current code)
 1. Create a new helper UI shell
    - Implement a lightweight floating container in `content.js` and new styles in `styles.css`.

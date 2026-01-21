@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Smart.pr Helper",
+  "version": "1.0.0",
+  "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://*.repl.co/*"
+  ],
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Smart.pr Helper"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://smart.pr/*",
+        "https://*.smart.pr/*"
+      ],
+      "js": ["api-client.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["fonts/gelica/*.otf", "logo-white.png"],
+      "matches": ["https://smart.pr/*", "https://*.smart.pr/*"]
+    }
+  ]
+}
