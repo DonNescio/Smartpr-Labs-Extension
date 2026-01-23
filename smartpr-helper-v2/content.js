@@ -42,6 +42,8 @@ let editorObserver = null;
 let scanThrottleTimer = null;
 let selectionUpdateTimer = null;
 let subjectFieldUpdateTimer = null;
+let iconVisibilityTimer = null;
+let paragraphIconDocs = new Set();
 
 // ========== Paragraph Coach - Classic Editor Detection ==========
 // Find Quill editors and their parent containers
@@ -154,6 +156,55 @@ function getBlockType(container) {
   return 'text';
 }
 
+function getActiveEditorFromSelection(doc) {
+  const selection = doc.getSelection?.();
+  if (!selection || selection.isCollapsed) return null;
+  const selectionText = selection.toString();
+  if (!selectionText || !selectionText.trim()) return null;
+
+  const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+  const node = range?.commonAncestorContainer || selection.anchorNode || selection.focusNode;
+  const element = node && node.nodeType === 1 ? node : node?.parentElement;
+  return element?.closest('.ql-editor') || null;
+}
+
+function setParagraphIconVisible(editor, isVisible) {
+  const container = getEditorContainer(editor);
+  if (!container) return;
+  const wrapper = container.parentElement;
+  if (!wrapper) return;
+  const icon = wrapper.querySelector('.sph-block-icon');
+  if (!icon) return;
+  icon.classList.toggle('sph-visible', isVisible);
+}
+
+function clearVisibleParagraphIcons() {
+  paragraphIconDocs.forEach((doc) => {
+    doc.querySelectorAll('.sph-block-icon.sph-visible').forEach((icon) => {
+      icon.classList.remove('sph-visible');
+    });
+  });
+}
+
+function handleParagraphSelectionChange(doc) {
+  if (iconVisibilityTimer) clearTimeout(iconVisibilityTimer);
+  iconVisibilityTimer = setTimeout(() => {
+    clearVisibleParagraphIcons();
+    const editor = getActiveEditorFromSelection(doc);
+    if (editor) {
+      setParagraphIconVisible(editor, true);
+    }
+  }, 100);
+}
+
+function registerParagraphSelectionListener(doc) {
+  if (!doc || doc._sphParagraphIconSelectionHandler) return;
+  const handler = () => handleParagraphSelectionChange(doc);
+  doc.addEventListener('selectionchange', handler);
+  doc._sphParagraphIconSelectionHandler = handler;
+  paragraphIconDocs.add(doc);
+}
+
 function addParagraphIcon(editor, iframeDoc = null) {
   if (paragraphIconsAdded.has(editor)) return;
 
@@ -185,6 +236,8 @@ function addParagraphIcon(editor, iframeDoc = null) {
   }
 
   paragraphIconsAdded.add(editor);
+  registerParagraphSelectionListener(doc);
+  handleParagraphSelectionChange(doc);
 
 
   // Click handler
@@ -245,6 +298,7 @@ function injectStylesIntoIframe(iframeDoc) {
       font-size: 16px;
       cursor: pointer;
       opacity: 0;
+      pointer-events: none;
       transition: all 0.2s ease;
       display: flex;
       align-items: center;
@@ -252,14 +306,13 @@ function injectStylesIntoIframe(iframeDoc) {
       box-shadow: 0 2px 8px rgba(212, 165, 245, 0.3);
       margin-top: 4px;
     }
+    .sph-block-icon.sph-visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
     .sph-block-icon:hover {
       transform: scale(1.1);
-      opacity: 1 !important;
       box-shadow: 0 4px 12px rgba(212, 165, 245, 0.5);
-    }
-    .sph-block-wrapper:hover .sph-block-icon,
-    .sph-block-icon:focus {
-      opacity: 1;
     }
   `;
   iframeDoc.head.appendChild(style);
@@ -336,6 +389,19 @@ function teardownParagraphCoach() {
     editorObserver.disconnect();
     editorObserver = null;
   }
+
+  if (iconVisibilityTimer) {
+    clearTimeout(iconVisibilityTimer);
+    iconVisibilityTimer = null;
+  }
+
+  paragraphIconDocs.forEach((doc) => {
+    if (doc._sphParagraphIconSelectionHandler) {
+      doc.removeEventListener('selectionchange', doc._sphParagraphIconSelectionHandler);
+      delete doc._sphParagraphIconSelectionHandler;
+    }
+  });
+  paragraphIconDocs.clear();
 }
 
 // ========== Subject Field Detection ==========

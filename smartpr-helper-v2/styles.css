@@ -635,6 +635,7 @@
   font-size: 16px;
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
   transition: all 0.2s ease;
   z-index: 100;
   display: flex;
@@ -643,18 +644,14 @@
   box-shadow: 0 2px 8px rgba(212, 165, 245, 0.3);
 }
 
+.sph-block-icon.sph-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .sph-block-icon:hover {
   transform: scale(1.1);
   box-shadow: 0 4px 12px rgba(212, 165, 245, 0.5);
-}
-
-/* Show icon when hovering the block container */
-preview-container:hover .sph-block-icon,
-[data-is]:hover .sph-block-icon,
-.ql-container:hover + .sph-block-icon,
-*:hover > .sph-block-icon,
-.sph-block-icon:focus {
-  opacity: 1;
 }
 
 /* Paragraph Nudge (legacy - keeping for now) */
