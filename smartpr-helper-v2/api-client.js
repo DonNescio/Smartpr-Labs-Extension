@@ -260,10 +260,44 @@ function isValidEmail(email) {
   return emailRegex.test(email);
 }
 
+/**
+ * Process paragraph text (grammar, translate, shorten, lengthen)
+ * @param {string} text - The text to process
+ * @param {string} action - The action: 'grammar', 'translate', 'shorter', 'longer'
+ * @param {object} options - Additional options (e.g., { targetLanguage: 'Dutch' } for translate)
+ * @returns {Promise<object>} - Processed text result
+ */
+async function processParagraph(text, action, options = {}) {
+  try {
+    const response = await callProxyAPI('/process-paragraph', {
+      text: text,
+      action: action,
+      options: options
+    });
+
+    if (!response.success || !response.text) {
+      throw {
+        code: 'INVALID_RESPONSE',
+        message: 'Invalid response from server'
+      };
+    }
+
+    return {
+      text: response.text,
+      usage: response.usage
+    };
+
+  } catch (error) {
+    console.error('[API Client] Process paragraph error:', error);
+    throw error;
+  }
+}
+
 // Export for use in other scripts
 window.SmartPRAPI = {
   generateSubjectLines,
   getSubjectFeedback,
+  processParagraph,
   validateUser,
   getErrorMessage,
   isValidEmail,

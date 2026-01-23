@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Smart.pr Assistant",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
@@ -21,11 +21,15 @@
     {
       "matches": [
         "https://smart.pr/*",
-        "https://*.smart.pr/*"
+        "https://*.smart.pr/*",
+        "https://svcs.smart.pr/*"
       ],
       "js": ["api-client.js", "content.js"],
       "css": ["styles.css"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     }
   ],
   "web_accessible_resources": [
