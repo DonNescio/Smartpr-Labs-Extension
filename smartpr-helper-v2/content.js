@@ -660,6 +660,16 @@ function updateSelectedTextFromEditor() {
   const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
   const editorWin = editorDoc.defaultView || window;
   const selection = editorWin?.getSelection();
+  const anchorNode = selection?.anchorNode;
+  const anchorElement = anchorNode && anchorNode.nodeType === 1
+    ? anchorNode
+    : anchorNode?.parentElement;
+  const activeEditor = anchorElement?.closest('.ql-editor');
+
+  if (activeEditor && activeEditor !== selectedEditor) {
+    selectedEditor = activeEditor;
+    selectedEditorDoc = activeEditor.ownerDocument || selectedEditorDoc;
+  }
 
   let newText = '';
 
