@@ -1,4 +1,4 @@
-/* Smart.pr Helper - Content Script */
+/* Smart.pr Helper - Content Script (V2 React App) */
 
 // ========== Utilities ==========
 // Get the top-level document (sidebar lives there, not in iframes)
@@ -45,114 +45,89 @@ let subjectFieldUpdateTimer = null;
 let iconVisibilityTimer = null;
 let paragraphIconDocs = new Set();
 
-// ========== Paragraph Coach - Classic Editor Detection ==========
-// Find Quill editors and their parent containers
+// ========== Paragraph Coach - V2 TipTap Editor Detection ==========
+// Find TipTap/ProseMirror editors in the V2 React app
 
-function findQuillEditors() {
-  // Find all Quill editor elements - try multiple selectors
-  let editors = $$('.ql-editor[contenteditable="true"]');
+// Track the editor iframe and its observer
+let editorIframe = null;
+let editorIframeObserver = null;
+let dialogObserver = null;
 
-  // Fallback: try without the attribute selector
+function findTipTapEditors(doc = document) {
+  // Find all TipTap editor elements (ProseMirror-based)
+  let editors = Array.from(doc.querySelectorAll('.tiptap.ProseMirror[contenteditable="true"]'));
+
+  // Fallback: try without contenteditable check
   if (editors.length === 0) {
-    editors = $$('.ql-editor[contenteditable]');
+    editors = Array.from(doc.querySelectorAll('.tiptap.ProseMirror'));
   }
-
-  // Another fallback: any ql-editor
-  if (editors.length === 0) {
-    editors = $$('.ql-editor');
-  }
-
-  // Filter out clipboard elements (they also have ql-editor class sometimes)
-  editors = editors.filter(el => !el.classList.contains('ql-clipboard'));
 
   return editors;
 }
 
-// Search for editors inside nested iframes (for about:blank iframes)
-function findEditorsInNestedIframes() {
-  const allEditors = [];
+// Find the blob iframe that contains the V2 editor
+function findEditorIframe() {
+  // V2 uses blob: URLs for the editor iframe
+  const iframes = $$('iframe[src^="blob:"]');
 
-  // Find all iframes in current document
-  const iframes = $$('iframe');
-
-  for (const iframe of iframes) {
-    try {
-      const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-      if (!iframeDoc) continue;
-
-      // Search for editors in this iframe
-      let editors = Array.from(iframeDoc.querySelectorAll('.ql-editor[contenteditable="true"]'));
-      if (editors.length === 0) {
-        editors = Array.from(iframeDoc.querySelectorAll('.ql-editor'));
+  // Also check for iframes with sandbox that might be the editor
+  if (iframes.length === 0) {
+    const sandboxedIframes = $$('iframe[sandbox*="allow-same-origin"]');
+    for (const iframe of sandboxedIframes) {
+      if (iframe.src && iframe.src.startsWith('blob:')) {
+        return iframe;
       }
-      editors = editors.filter(el => !el.classList.contains('ql-clipboard'));
-
-      if (editors.length > 0) {
-        allEditors.push(...editors.map(editor => ({ editor, iframeDoc, iframe })));
-      }
-
-      // Also check for iframes inside this iframe (deeper nesting)
-      const nestedIframes = Array.from(iframeDoc.querySelectorAll('iframe'));
-      for (const nestedIframe of nestedIframes) {
-        try {
-          const nestedDoc = nestedIframe.contentDocument || nestedIframe.contentWindow?.document;
-          if (!nestedDoc) continue;
-
-          let nestedEditors = Array.from(nestedDoc.querySelectorAll('.ql-editor[contenteditable="true"]'));
-          if (nestedEditors.length === 0) {
-            nestedEditors = Array.from(nestedDoc.querySelectorAll('.ql-editor'));
-          }
-          nestedEditors = nestedEditors.filter(el => !el.classList.contains('ql-clipboard'));
-
-          if (nestedEditors.length > 0) {
-            allEditors.push(...nestedEditors.map(editor => ({ editor, iframeDoc: nestedDoc, iframe: nestedIframe })));
-          }
-        } catch (e) {
-          // Cross-origin iframe, skip
-        }
-      }
-    } catch (e) {
-      // Cross-origin iframe, skip
     }
   }
 
-  return allEditors;
+  return iframes[0] || null;
+}
+
+// Get editors from inside the blob iframe
+function findEditorsInBlobIframe() {
+  const iframe = findEditorIframe();
+  if (!iframe) return [];
+
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) return [];
+
+    const editors = findTipTapEditors(iframeDoc);
+    return editors.map(editor => ({ editor, iframeDoc, iframe }));
+  } catch (e) {
+    // Cross-origin or not ready
+    return [];
+  }
 }
 
 function getEditorContainer(editor) {
-  // Walk up to find a container with data-is attribute or preview-container
-  let node = editor.parentElement;
-  while (node && node !== document.body) {
-    if (node.hasAttribute('data-is') || node.tagName.toLowerCase() === 'preview-container') {
-      return node;
-    }
-    // Also check for .ql-container's parent
-    if (node.classList.contains('ql-container')) {
-      const parent = node.parentElement;
-      if (parent && (parent.hasAttribute('data-is') || parent.tagName.toLowerCase() === 'preview-container')) {
-        return parent;
-      }
-    }
-    node = node.parentElement;
-  }
-  // Fallback: return the ql-container or editor's direct parent
-  return editor.closest('.ql-container')?.parentElement || editor.parentElement;
+  // V2: Walk up to find .block-wrapper
+  const blockWrapper = editor.closest('.block-wrapper');
+  if (blockWrapper) return blockWrapper;
+
+  // Fallback: return direct parent
+  return editor.parentElement;
 }
 
 function getBlockType(container) {
   if (!container) return 'text';
-  const dataIs = container.getAttribute?.('data-is');
-  if (dataIs === 'preview-line') {
-    const editor = container.querySelector('.ql-editor');
-    if (editor) {
-      if (editor.querySelector('h1')) return 'heading';
-      if (editor.querySelector('h2')) return 'subheading';
+
+  // V2: Check for heading/subheading inputs inside block-wrapper
+  if (container.classList?.contains('block-wrapper')) {
+    // Check for h1 with input (heading block)
+    if (container.querySelector('h1 > input')) return 'heading';
+    // Check for h2 with input (subheading block)
+    if (container.querySelector('h2 > input')) return 'subheading';
+    // Check block-label for type hint
+    const blockLabel = container.querySelector('.block-label');
+    if (blockLabel) {
+      const labelText = blockLabel.textContent?.trim().toLowerCase();
+      if (labelText === 'text' || labelText === 'paragraph') return 'paragraph';
     }
-    return 'heading';
+    // Has TipTap editor = text block
+    if (container.querySelector('.tiptap.ProseMirror')) return 'paragraph';
   }
-  if (dataIs === 'preview-richtext') {
-    return 'paragraph';
-  }
+
   return 'text';
 }
 
@@ -165,7 +140,8 @@ function getActiveEditorFromSelection(doc) {
   const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
   const node = range?.commonAncestorContainer || selection.anchorNode || selection.focusNode;
   const element = node && node.nodeType === 1 ? node : node?.parentElement;
-  return element?.closest('.ql-editor') || null;
+  // V2: Find TipTap editor instead of Quill
+  return element?.closest('.tiptap.ProseMirror') || null;
 }
 
 function setParagraphIconVisible(editor, isVisible) {
@@ -319,71 +295,203 @@ function injectStylesIntoIframe(iframeDoc) {
 }
 
 function scanAndAddIcons() {
-  // Scan editors in current document
-  const editors = findQuillEditors();
-  editors.forEach(editor => addParagraphIcon(editor, null));
+  // V2: Scan editors inside the blob iframe
+  const iframeEditors = findEditorsInBlobIframe();
+  iframeEditors.forEach(({ editor, iframeDoc }) => addParagraphIcon(editor, iframeDoc));
 
-  // Also scan editors in nested iframes (for about:blank iframes)
-  const nestedEditors = findEditorsInNestedIframes();
-  nestedEditors.forEach(({ editor, iframeDoc }) => addParagraphIcon(editor, iframeDoc));
+  return iframeEditors.length;
+}
 
-  return editors.length + nestedEditors.length;
+// Watch the blob iframe for content changes
+function watchEditorIframe(iframe) {
+  if (editorIframe === iframe && editorIframeObserver) return; // Already watching
+
+  // Clean up previous observer
+  if (editorIframeObserver) {
+    editorIframeObserver.disconnect();
+    editorIframeObserver = null;
+  }
+
+  editorIframe = iframe;
+
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc || !iframeDoc.body) {
+      // Not ready yet, wait for load
+      iframe.addEventListener('load', () => watchEditorIframe(iframe), { once: true });
+      return;
+    }
+
+    console.log('[Smart.pr Helper] Watching editor iframe for changes');
+
+    // Initial scan
+    const count = scanAndAddIcons();
+    console.log(`[Smart.pr Helper] Initial scan found ${count} editors`);
+
+    // Watch for new blocks being added inside the iframe
+    editorIframeObserver = new MutationObserver(() => {
+      if (scanThrottleTimer) return;
+      scanThrottleTimer = setTimeout(() => {
+        scanThrottleTimer = null;
+        scanAndAddIcons();
+      }, 300);
+    });
+
+    editorIframeObserver.observe(iframeDoc.body, {
+      childList: true,
+      subtree: true
+    });
+
+    // Also register selection listener in the iframe
+    registerParagraphSelectionListener(iframeDoc);
+
+  } catch (e) {
+    console.warn('[Smart.pr Helper] Could not access iframe:', e);
+  }
+}
+
+// Watch for the mailing dialog and editor iframe to appear
+function initDialogWatcher() {
+  if (dialogObserver) return; // Already watching
+
+  console.log('[Smart.pr Helper] Starting dialog watcher');
+
+  const checkForEditorIframe = () => {
+    const iframe = findEditorIframe();
+    if (iframe && iframe !== editorIframe) {
+      console.log('[Smart.pr Helper] Editor iframe detected');
+      watchEditorIframe(iframe);
+    }
+  };
+
+  const checkForSubjectField = () => {
+    const field = findSubjectField();
+    if (field && field !== subjectField) {
+      console.log('[Smart.pr Helper] Subject field detected');
+      subjectField = field;
+      if (!subjectListenersAttached) {
+        subjectField.addEventListener('focus', handleSubjectFocus);
+        subjectField.addEventListener('input', handleSubjectInput);
+        subjectListenersAttached = true;
+      }
+      lastSubjectValue = subjectField.value;
+    }
+  };
+
+  // Initial checks
+  checkForEditorIframe();
+  checkForSubjectField();
+
+  // Watch for dialogs appearing/disappearing
+  dialogObserver = new MutationObserver((mutations) => {
+    // Check if any relevant elements were added
+    let shouldCheckIframe = false;
+    let shouldCheckSubject = false;
+
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+        // Check for iframe being added
+        if (node.tagName === 'IFRAME' || node.querySelector?.('iframe')) {
+          shouldCheckIframe = true;
+        }
+
+        // Check for dialog/form being added (contains subject field)
+        if (node.querySelector?.('input[name="subject"]') ||
+            node.matches?.('.Dialog') ||
+            node.querySelector?.('.Dialog')) {
+          shouldCheckSubject = true;
+        }
+      }
+
+      // Check for removals (dialog closed)
+      for (const node of mutation.removedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+        // If dialog was removed, reset state
+        if (node.matches?.('.Dialog') || node.querySelector?.('.Dialog')) {
+          console.log('[Smart.pr Helper] Dialog closed, resetting state');
+          resetDetectionState();
+        }
+      }
+    }
+
+    if (shouldCheckIframe) {
+      // Debounce iframe checks
+      setTimeout(checkForEditorIframe, 100);
+    }
+
+    if (shouldCheckSubject) {
+      // Debounce subject field checks
+      setTimeout(checkForSubjectField, 100);
+    }
+  });
+
+  dialogObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+}
+
+// Reset detection state when dialog closes
+function resetDetectionState() {
+  // Clean up editor iframe watching
+  if (editorIframeObserver) {
+    editorIframeObserver.disconnect();
+    editorIframeObserver = null;
+  }
+  editorIframe = null;
+
+  // Clean up subject field
+  detachSubjectListeners();
+  subjectField = null;
+
+  // Clean up paragraph coach state
+  paragraphIconsAdded = new WeakSet();
+  selectedEditor = null;
+  selectedEditorDoc = null;
+  selectedText = '';
+  currentSelection = null;
 }
 
 function initParagraphCoach() {
   if (extensionDisabled) return;
 
-
-  // Function to scan and report
-  const doScan = () => {
-    // Scan editors in current document
-    const editors = findQuillEditors();
-    editors.forEach(editor => addParagraphIcon(editor, null));
-
-    // Also scan editors in nested iframes (for about:blank iframes)
-    const nestedEditors = findEditorsInNestedIframes();
-    nestedEditors.forEach(({ editor, iframeDoc }) => addParagraphIcon(editor, iframeDoc));
-
-    return editors.length + nestedEditors.length;
-  };
-
-  // Initial scan
-  let found = doScan();
-
-  // Retry with longer delays (editors may load very late, especially in iframes)
-  const retryDelays = [500, 1000, 2000, 3000, 5000, 8000, 12000];
-  retryDelays.forEach((delay) => {
-    setTimeout(() => {
-      const count = doScan();
-      if (count > 0 && found === 0) {
-        found = count;
-      }
-    }, delay);
-  });
-
-  // Watch for new blocks being added (including iframes loading)
-  // Throttle to avoid excessive scanning
-  if (!editorObserver) {
-    editorObserver = new MutationObserver(() => {
-      if (scanThrottleTimer) return;
-      scanThrottleTimer = setTimeout(() => {
-        scanThrottleTimer = null;
-        doScan();
-      }, 500);
-    });
-
-    editorObserver.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-  }
-
+  // V2: Use dialog-aware detection instead of polling
+  initDialogWatcher();
 }
 
 function teardownParagraphCoach() {
-  // Remove all icons
+  // Remove all icons (check both main doc and iframe)
   $$('.sph-block-icon').forEach(icon => icon.remove());
+
+  // Also remove from iframe if present
+  if (editorIframe) {
+    try {
+      const iframeDoc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      if (iframeDoc) {
+        Array.from(iframeDoc.querySelectorAll('.sph-block-icon')).forEach(icon => icon.remove());
+      }
+    } catch (e) {
+      // Ignore cross-origin errors
+    }
+  }
+
   paragraphIconsAdded = new WeakSet();
+
+  // V2: Clean up dialog observer
+  if (dialogObserver) {
+    dialogObserver.disconnect();
+    dialogObserver = null;
+  }
+
+  // V2: Clean up iframe observer
+  if (editorIframeObserver) {
+    editorIframeObserver.disconnect();
+    editorIframeObserver = null;
+  }
+  editorIframe = null;
 
   if (editorObserver) {
     editorObserver.disconnect();
@@ -404,14 +512,14 @@ function teardownParagraphCoach() {
   paragraphIconDocs.clear();
 }
 
-// ========== Subject Field Detection ==========
+// ========== Subject Field Detection (V2) ==========
 function findSubjectField() {
+  // V2 React app selectors - prioritized list
   const selectors = [
-    'input[placeholder="Please type your subject"]',
-    'input[name="subject"]',
-    'input[aria-label="Subject"]',
-    'input[placeholder*="subject" i]',
-    'input[placeholder*="onderwerp" i]'
+    'input[name="subject"]',                      // V2 primary selector
+    'input[placeholder="Type your subject"]',     // V2 placeholder
+    'input[placeholder*="subject" i]',            // Fallback: any subject placeholder
+    'input[placeholder*="onderwerp" i]'           // Dutch fallback
   ];
 
   for (const selector of selectors) {
@@ -422,28 +530,13 @@ function findSubjectField() {
   return null;
 }
 
+// Note: watchSubjectField is no longer used in V2
+// Subject field detection is handled by initDialogWatcher()
 function watchSubjectField() {
+  // V2: This is now handled by the dialog watcher
+  // Keeping for backwards compatibility but it just calls the dialog watcher
   if (extensionDisabled) return;
-  subjectField = findSubjectField();
-
-  if (!subjectField) {
-    subjectWatchTimer = setTimeout(watchSubjectField, 1000);
-    return;
-  }
-
-  console.log('[Smart.pr Helper] Subject field found');
-
-  // Watch for focus
-  if (!subjectListenersAttached) {
-    subjectField.addEventListener('focus', handleSubjectFocus);
-
-    // Watch for value changes
-    subjectField.addEventListener('input', handleSubjectInput);
-    subjectListenersAttached = true;
-  }
-
-  // Initial check
-  lastSubjectValue = subjectField.value;
+  initDialogWatcher();
 }
 
 function handleSubjectFocus() {
@@ -730,7 +823,8 @@ function updateSelectedTextFromEditor() {
   const anchorElement = anchorNode && anchorNode.nodeType === 1
     ? anchorNode
     : anchorNode?.parentElement;
-  const activeEditor = anchorElement?.closest('.ql-editor');
+  // V2: Find TipTap editor instead of Quill
+  const activeEditor = anchorElement?.closest('.tiptap.ProseMirror');
 
   if (activeEditor && activeEditor !== selectedEditor) {
     selectedEditor = activeEditor;
@@ -833,8 +927,8 @@ function showParagraphCoachContent() {
   if (extensionDisabled) return;
   const content = $('#sph-content');
 
-  // Get block type from the editor's container
-  const container = selectedEditor ? selectedEditor.closest('preview-container') : null;
+  // V2: Get block type from the editor's .block-wrapper container
+  const container = selectedEditor ? selectedEditor.closest('.block-wrapper') : null;
   const blockType = container ? getBlockType(container) : 'text';
   const typeLabel = blockType === 'heading' ? 'Heading' : blockType === 'subheading' ? 'Subheading' : 'Text';
 
@@ -1097,7 +1191,7 @@ function replaceTextInEditor(newText) {
       selection.removeAllRanges();
       selection.addRange(currentSelection);
 
-      // Use execCommand on the correct document (works with Quill's undo stack)
+      // Use execCommand on the correct document (works with TipTap's undo stack)
       editorDoc.execCommand('insertText', false, newText);
     } else {
       // No saved selection - replace entire content
@@ -1574,18 +1668,17 @@ function applyExtensionState(disabled) {
     return;
   }
 
-  // Only create floating icon in the top frame, not in iframes
+  // Only run in the top frame for V2 (dialogs and iframes are managed from top)
   const isTopFrame = window === window.top;
 
   if (isTopFrame) {
     if (!floatingIcon) {
       createFloatingIcon();
     }
-    watchSubjectField();
-  }
 
-  // Paragraph Coach works in all frames (including iframes where editors live)
-  initParagraphCoach();
+    // V2: Single dialog watcher handles both subject field and editor detection
+    initDialogWatcher();
+  }
 }
 
 function init() {
