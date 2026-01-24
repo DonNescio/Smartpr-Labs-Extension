@@ -37,13 +37,17 @@ let selectedText = '';
 let selectedEditor = null;
 let selectedEditorDoc = null; // The document the editor lives in (for iframe support)
 let currentSidebarMode = 'subject'; // 'subject' or 'paragraph'
-let paragraphIconsAdded = new WeakSet();
 let editorObserver = null;
 let scanThrottleTimer = null;
 let selectionUpdateTimer = null;
 let subjectFieldUpdateTimer = null;
 let iconVisibilityTimer = null;
 let paragraphIconDocs = new Set();
+
+// Floating icon overlay state (keeps icons outside React's DOM tree)
+let iconOverlayContainer = null;
+let elementToIconMap = new WeakMap(); // Maps editor elements to their icon elements
+let iconPositionUpdateTimer = null;
 
 // ========== Paragraph Coach - V2 TipTap Editor Detection ==========
 // Find TipTap/ProseMirror editors in the V2 React app
@@ -65,6 +69,31 @@ function findTipTapEditors(doc = document) {
   return editors;
 }
 
+// Find heading/subheading input fields in V2
+function findHeadingInputs(doc = document) {
+  // H1 and H2 blocks use <input> elements instead of TipTap
+  const h1Inputs = Array.from(doc.querySelectorAll('.block-wrapper h1 > input'));
+  const h2Inputs = Array.from(doc.querySelectorAll('.block-wrapper h2 > input'));
+  return [...h1Inputs, ...h2Inputs];
+}
+
+// Find all editable blocks (both TipTap editors and heading inputs)
+function findAllEditableBlocks(doc = document) {
+  const tipTapEditors = findTipTapEditors(doc).map(editor => ({
+    element: editor,
+    type: 'tiptap',
+    doc
+  }));
+
+  const headingInputs = findHeadingInputs(doc).map(input => ({
+    element: input,
+    type: 'heading',
+    doc
+  }));
+
+  return [...tipTapEditors, ...headingInputs];
+}
+
 // Find the blob iframe that contains the V2 editor
 function findEditorIframe() {
   // V2 uses blob: URLs for the editor iframe
@@ -83,19 +112,39 @@ function findEditorIframe() {
   return iframes[0] || null;
 }
 
-// Get editors from inside the blob iframe
+// Get all editable blocks from inside the blob iframe
 function findEditorsInBlobIframe() {
   const iframe = findEditorIframe();
-  if (!iframe) return [];
+  if (!iframe) {
+    console.log('[Smart.pr Helper] No editor iframe found');
+    return [];
+  }
 
   try {
     const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-    if (!iframeDoc) return [];
+    if (!iframeDoc) {
+      console.log('[Smart.pr Helper] Could not access iframe document');
+      return [];
+    }
 
-    const editors = findTipTapEditors(iframeDoc);
-    return editors.map(editor => ({ editor, iframeDoc, iframe }));
+    console.log('[Smart.pr Helper] Scanning iframe for editors...');
+    console.log('[Smart.pr Helper] iframe body children:', iframeDoc.body?.children?.length);
+
+    // Debug: Log what we find
+    const tipTapEditors = iframeDoc.querySelectorAll('.tiptap.ProseMirror');
+    const blockWrappers = iframeDoc.querySelectorAll('.block-wrapper');
+    console.log('[Smart.pr Helper] Found .tiptap.ProseMirror:', tipTapEditors.length);
+    console.log('[Smart.pr Helper] Found .block-wrapper:', blockWrappers.length);
+
+    const blocks = findAllEditableBlocks(iframeDoc);
+    return blocks.map(block => ({
+      element: block.element,
+      type: block.type,
+      iframeDoc,
+      iframe
+    }));
   } catch (e) {
-    // Cross-origin or not ready
+    console.warn('[Smart.pr Helper] Error accessing iframe:', e);
     return [];
   }
 }
@@ -145,18 +194,16 @@ function getActiveEditorFromSelection(doc) {
 }
 
 function setParagraphIconVisible(editor, isVisible) {
-  const container = getEditorContainer(editor);
-  if (!container) return;
-  const wrapper = container.parentElement;
-  if (!wrapper) return;
-  const icon = wrapper.querySelector('.sph-block-icon');
+  // Look up icon from our map (icons are in overlay, not in React's DOM)
+  const icon = elementToIconMap.get(editor);
   if (!icon) return;
   icon.classList.toggle('sph-visible', isVisible);
 }
 
 function clearVisibleParagraphIcons() {
+  // Only clear selection-managed icons (TipTap), not focus-managed icons (headings)
   paragraphIconDocs.forEach((doc) => {
-    doc.querySelectorAll('.sph-block-icon.sph-visible').forEach((icon) => {
+    doc.querySelectorAll('.sph-block-icon.sph-visible:not([data-focus-managed])').forEach((icon) => {
       icon.classList.remove('sph-visible');
     });
   });
@@ -181,58 +228,130 @@ function registerParagraphSelectionListener(doc) {
   paragraphIconDocs.add(doc);
 }
 
-function addParagraphIcon(editor, iframeDoc = null) {
-  if (paragraphIconsAdded.has(editor)) return;
+// Create or get the overlay container for floating icons (outside React's DOM)
+function getOrCreateIconOverlay(iframeDoc) {
+  if (iconOverlayContainer && iconOverlayContainer.ownerDocument === iframeDoc) {
+    return iconOverlayContainer;
+  }
 
-  // Get or create a container for positioning
-  const container = getEditorContainer(editor);
+  console.log('[Smart.pr Helper] Creating icon overlay container');
+
+  // Create new overlay container (use fixed positioning for reliability)
+  iconOverlayContainer = iframeDoc.createElement('div');
+  iconOverlayContainer.id = 'sph-icon-overlay';
+  iconOverlayContainer.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 9999;';
+  iframeDoc.body.appendChild(iconOverlayContainer);
+
+  // Inject styles if not already done
+  if (!iframeDoc.getElementById('sph-injected-styles')) {
+    injectStylesIntoIframe(iframeDoc);
+  }
+
+  return iconOverlayContainer;
+}
+
+// Update icon position to match its target element
+function updateIconPosition(icon, element) {
+  const container = getEditorContainer(element);
   if (!container) return;
 
-  // Determine which document to use for creating elements
-  const doc = iframeDoc || editor.ownerDocument || document;
+  // Use viewport-relative coordinates (for fixed positioning)
+  const rect = container.getBoundingClientRect();
 
-  // Create a wrapper that will hold the container and icon side by side
-  const wrapper = doc.createElement('div');
-  wrapper.className = 'sph-block-wrapper';
+  // Position icon inside the block (top-right corner)
+  icon.style.top = `${rect.top + 4}px`;
+  icon.style.left = `${rect.right - 40}px`; // Inside the block, 40px from right edge
+}
 
-  // Create the icon button
+// Update all icon positions (called on scroll/resize)
+function updateAllIconPositions() {
+  if (iconPositionUpdateTimer) return;
+  iconPositionUpdateTimer = requestAnimationFrame(() => {
+    iconPositionUpdateTimer = null;
+    if (!iconOverlayContainer) return;
+
+    const icons = iconOverlayContainer.querySelectorAll('.sph-block-icon');
+    icons.forEach(icon => {
+      const element = icon._targetElement;
+      if (element && element.isConnected) {
+        updateIconPosition(icon, element);
+      } else {
+        // Element was removed, clean up icon
+        icon.remove();
+        if (element) elementToIconMap.delete(element);
+      }
+    });
+  });
+}
+
+function addParagraphIcon(element, iframeDoc = null, elementType = 'tiptap') {
+  // Check if we already have an icon for this element
+  if (elementToIconMap.has(element)) return;
+
+  // Get the block-wrapper container
+  const container = getEditorContainer(element);
+  if (!container) return;
+
+  // Determine which document to use
+  const doc = iframeDoc || element.ownerDocument || document;
+
+  // Get or create the overlay container (OUTSIDE React's DOM)
+  const overlay = getOrCreateIconOverlay(doc);
+
+  // Create floating icon
   const iconBtn = doc.createElement('button');
   iconBtn.className = 'sph-block-icon';
   iconBtn.innerHTML = '✨';
   iconBtn.title = 'Improve with AI';
+  iconBtn._targetElement = element; // Store reference for position updates
 
-  // Insert wrapper before container, then move container inside wrapper
-  container.parentNode.insertBefore(wrapper, container);
-  wrapper.appendChild(container);
-  wrapper.appendChild(iconBtn);
+  // Add to overlay (not to React's DOM!)
+  overlay.appendChild(iconBtn);
 
-  // Inject styles if in iframe and not already injected
-  if (iframeDoc && !iframeDoc.getElementById('sph-injected-styles')) {
-    injectStylesIntoIframe(iframeDoc);
+  // Position icon next to the element
+  updateIconPosition(iconBtn, element);
+  console.log('[Smart.pr Helper] Added icon for', elementType, 'at', iconBtn.style.top, iconBtn.style.left);
+
+  // Store in our map
+  elementToIconMap.set(element, iconBtn);
+
+  // For TipTap editors, register selection listener for icon visibility
+  if (elementType === 'tiptap') {
+    registerParagraphSelectionListener(doc);
+    handleParagraphSelectionChange(doc);
+  } else {
+    // For heading inputs, show icon on focus instead of selection
+    element.addEventListener('focus', () => setParagraphIconVisible(element, true));
+    element.addEventListener('blur', () => {
+      // Delay hiding to allow click on icon
+      setTimeout(() => setParagraphIconVisible(element, false), 200);
+    });
   }
-
-  paragraphIconsAdded.add(editor);
-  registerParagraphSelectionListener(doc);
-  handleParagraphSelectionChange(doc);
-
 
   // Click handler
   iconBtn.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
 
-    // Get selected text or full content - use the iframe's window for selection if applicable
-    const win = iframeDoc ? iframeDoc.defaultView : window;
-    const selection = win?.getSelection();
     let text = '';
 
-    if (selection && !selection.isCollapsed && editor.contains(selection.anchorNode)) {
-      text = selection.toString().trim();
-      currentSelection = selection.getRangeAt(0).cloneRange();
-    } else {
-      // Use full editor content
-      text = editor.innerText.trim();
+    if (elementType === 'heading') {
+      // For heading inputs, get value from input
+      text = element.value?.trim() || '';
       currentSelection = null;
+    } else {
+      // For TipTap editors, check for selection first
+      const win = iframeDoc ? iframeDoc.defaultView : window;
+      const selection = win?.getSelection();
+
+      if (selection && !selection.isCollapsed && element.contains(selection.anchorNode)) {
+        text = selection.toString().trim();
+        currentSelection = selection.getRangeAt(0).cloneRange();
+      } else {
+        // Use full editor content
+        text = element.innerText.trim();
+        currentSelection = null;
+      }
     }
 
     if (!text) {
@@ -241,30 +360,29 @@ function addParagraphIcon(editor, iframeDoc = null) {
     }
 
     selectedText = text;
-    selectedEditor = editor;
-    selectedEditorDoc = iframeDoc; // Store the document context for later
+    selectedEditor = element;
+    selectedEditorDoc = iframeDoc; // Store reference for later
 
     openParagraphCoachSidebar();
   });
 }
 
-// Inject minimal styles into iframe for the icon
+// Inject minimal styles into iframe for the floating icons
 function injectStylesIntoIframe(iframeDoc) {
   const style = iframeDoc.createElement('style');
   style.id = 'sph-injected-styles';
   style.textContent = `
-    .sph-block-wrapper {
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
-      position: relative;
-    }
-    .sph-block-wrapper > *:first-child {
-      flex: 1;
-      min-width: 0;
+    #sph-icon-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 9999;
     }
     .sph-block-icon {
-      flex-shrink: 0;
+      position: absolute;
       width: 32px;
       height: 32px;
       border: none;
@@ -275,12 +393,11 @@ function injectStylesIntoIframe(iframeDoc) {
       cursor: pointer;
       opacity: 0;
       pointer-events: none;
-      transition: all 0.2s ease;
+      transition: opacity 0.2s ease, transform 0.2s ease;
       display: flex;
       align-items: center;
       justify-content: center;
       box-shadow: 0 2px 8px rgba(212, 165, 245, 0.3);
-      margin-top: 4px;
     }
     .sph-block-icon.sph-visible {
       opacity: 1;
@@ -292,14 +409,23 @@ function injectStylesIntoIframe(iframeDoc) {
     }
   `;
   iframeDoc.head.appendChild(style);
+
+  // Add scroll listener to update icon positions
+  const iframeWin = iframeDoc.defaultView;
+  if (iframeWin) {
+    iframeWin.addEventListener('scroll', updateAllIconPositions, { passive: true });
+    iframeWin.addEventListener('resize', updateAllIconPositions, { passive: true });
+  }
 }
 
 function scanAndAddIcons() {
-  // V2: Scan editors inside the blob iframe
-  const iframeEditors = findEditorsInBlobIframe();
-  iframeEditors.forEach(({ editor, iframeDoc }) => addParagraphIcon(editor, iframeDoc));
+  // V2: Scan all editable blocks inside the blob iframe
+  const iframeBlocks = findEditorsInBlobIframe();
+  iframeBlocks.forEach(({ element, type, iframeDoc }) => {
+    addParagraphIcon(element, iframeDoc, type);
+  });
 
-  return iframeEditors.length;
+  return iframeBlocks.length;
 }
 
 // Watch the blob iframe for content changes
@@ -318,15 +444,26 @@ function watchEditorIframe(iframe) {
     const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
     if (!iframeDoc || !iframeDoc.body) {
       // Not ready yet, wait for load
+      console.log('[Smart.pr Helper] Iframe not ready, waiting for load...');
       iframe.addEventListener('load', () => watchEditorIframe(iframe), { once: true });
       return;
     }
 
     console.log('[Smart.pr Helper] Watching editor iframe for changes');
 
-    // Initial scan
-    const count = scanAndAddIcons();
-    console.log(`[Smart.pr Helper] Initial scan found ${count} editors`);
+    // Wait a moment for React to render content, then do initial scan
+    setTimeout(() => {
+      const count = scanAndAddIcons();
+      console.log(`[Smart.pr Helper] Initial scan found ${count} editors`);
+
+      // If no editors found, try again after a delay (React might still be rendering)
+      if (count === 0) {
+        setTimeout(() => {
+          const retryCount = scanAndAddIcons();
+          console.log(`[Smart.pr Helper] Retry scan found ${retryCount} editors`);
+        }, 500);
+      }
+    }, 200);
 
     // Watch for new blocks being added inside the iframe
     editorIframeObserver = new MutationObserver(() => {
@@ -334,6 +471,7 @@ function watchEditorIframe(iframe) {
       scanThrottleTimer = setTimeout(() => {
         scanThrottleTimer = null;
         scanAndAddIcons();
+        updateAllIconPositions(); // Update positions when DOM changes
       }, 300);
     });
 
@@ -447,8 +585,14 @@ function resetDetectionState() {
   detachSubjectListeners();
   subjectField = null;
 
+  // Clean up floating icon overlay (it's safe, it's outside React's DOM)
+  if (iconOverlayContainer) {
+    iconOverlayContainer.remove();
+    iconOverlayContainer = null;
+  }
+  elementToIconMap = new WeakMap();
+
   // Clean up paragraph coach state
-  paragraphIconsAdded = new WeakSet();
   selectedEditor = null;
   selectedEditorDoc = null;
   selectedText = '';
@@ -463,22 +607,12 @@ function initParagraphCoach() {
 }
 
 function teardownParagraphCoach() {
-  // Remove all icons (check both main doc and iframe)
-  $$('.sph-block-icon').forEach(icon => icon.remove());
-
-  // Also remove from iframe if present
-  if (editorIframe) {
-    try {
-      const iframeDoc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
-      if (iframeDoc) {
-        Array.from(iframeDoc.querySelectorAll('.sph-block-icon')).forEach(icon => icon.remove());
-      }
-    } catch (e) {
-      // Ignore cross-origin errors
-    }
+  // Remove the floating icon overlay (it's outside React's DOM, safe to remove)
+  if (iconOverlayContainer) {
+    iconOverlayContainer.remove();
+    iconOverlayContainer = null;
   }
-
-  paragraphIconsAdded = new WeakSet();
+  elementToIconMap = new WeakMap();
 
   // V2: Clean up dialog observer
   if (dialogObserver) {
@@ -540,6 +674,7 @@ function watchSubjectField() {
 }
 
 function handleSubjectFocus() {
+  console.log('[Smart.pr Helper] Subject field focused');
   if (extensionDisabled) return;
   const currentValue = subjectField.value.trim();
 
@@ -570,6 +705,7 @@ function handleSubjectInput() {
 
 // ========== Nudge System ==========
 function showNudge(message, type) {
+  console.log('[Smart.pr Helper] showNudge called:', message, type);
   if (extensionDisabled) return;
   // Don't show if already showing
   if (currentNudge) return;
@@ -733,7 +869,58 @@ function openSidebar(type) {
 
 function openSidebarFromIcon() {
   if (extensionDisabled) return;
-  // When opened from floating icon (not from nudge), detect context
+
+  // Detect context: Are we in editor mode or subject line mode?
+  const hasEditorIframe = editorIframe !== null;
+
+  if (hasEditorIframe) {
+    // We're in editor mode - check for text selection
+    try {
+      const iframeDoc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      const iframeWin = editorIframe.contentWindow;
+
+      if (iframeDoc && iframeWin) {
+        const selection = iframeWin.getSelection();
+        const hasSelection = selection && !selection.isCollapsed && selection.toString().trim();
+
+        if (hasSelection) {
+          // User has text selected - find which editor it's in
+          const anchorNode = selection.anchorNode;
+          const anchorElement = anchorNode && anchorNode.nodeType === 1
+            ? anchorNode
+            : anchorNode?.parentElement;
+
+          // Check for TipTap editor
+          let editor = anchorElement?.closest('.tiptap.ProseMirror');
+
+          // Also check for heading input (selection in input)
+          if (!editor && anchorElement?.tagName === 'INPUT') {
+            const blockWrapper = anchorElement.closest('.block-wrapper');
+            if (blockWrapper && (blockWrapper.querySelector('h1 > input') || blockWrapper.querySelector('h2 > input'))) {
+              editor = anchorElement;
+            }
+          }
+
+          if (editor) {
+            selectedText = selection.toString().trim();
+            selectedEditor = editor;
+            selectedEditorDoc = iframeDoc;
+            currentSelection = selection.getRangeAt(0).cloneRange();
+            openParagraphCoachSidebar();
+            return;
+          }
+        }
+
+        // No selection - show editor context prompt
+        openEditorContextSidebar();
+        return;
+      }
+    } catch (e) {
+      console.warn('[Smart.pr Helper] Could not access editor iframe:', e);
+    }
+  }
+
+  // Fallback to subject line mode
   const currentValue = subjectField ? subjectField.value.trim() : '';
 
   if (currentValue === '') {
@@ -778,6 +965,49 @@ function openParagraphCoachSidebar() {
   startSelectionTracking();
 }
 
+// Show sidebar when in editor context but no text selected
+function openEditorContextSidebar() {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  currentSidebarMode = 'paragraph';
+
+  // Update sidebar title
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = 'Paragraph Coach';
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  // Show helpful prompt to select text
+  const content = $('#sph-content');
+  content.innerHTML = `
+    <div class="sph-empty">
+      <div class="sph-empty-icon">✨</div>
+      <div class="sph-empty-text">
+        <strong>Select text to improve</strong>
+        <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
+          Highlight text in any heading or paragraph block, then click the ✨ icon that appears to get AI-powered suggestions.
+        </p>
+      </div>
+    </div>
+    <div class="sph-section" style="margin-top: 16px;">
+      <span class="sph-label">What you can do</span>
+      <div class="sph-help-list" style="font-size: 13px; color: #374151; line-height: 1.6;">
+        <div style="margin-bottom: 8px;">✓ Fix spelling & grammar</div>
+        <div style="margin-bottom: 8px;">🌐 Translate to other languages</div>
+        <div style="margin-bottom: 8px;">📝 Make text shorter</div>
+        <div style="margin-bottom: 8px;">📄 Make text longer</div>
+      </div>
+    </div>
+  `;
+}
+
 function startSelectionTracking() {
   stopSelectionTracking(); // Clear any existing listeners
 
@@ -816,30 +1046,40 @@ function stopSelectionTracking() {
 function updateSelectedTextFromEditor() {
   if (!selectedEditor || currentSidebarMode !== 'paragraph') return;
 
-  const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
-  const editorWin = editorDoc.defaultView || window;
-  const selection = editorWin?.getSelection();
-  const anchorNode = selection?.anchorNode;
-  const anchorElement = anchorNode && anchorNode.nodeType === 1
-    ? anchorNode
-    : anchorNode?.parentElement;
-  // V2: Find TipTap editor instead of Quill
-  const activeEditor = anchorElement?.closest('.tiptap.ProseMirror');
-
-  if (activeEditor && activeEditor !== selectedEditor) {
-    selectedEditor = activeEditor;
-    selectedEditorDoc = activeEditor.ownerDocument || selectedEditorDoc;
-  }
+  // Check if this is a heading input
+  const isInputElement = selectedEditor.tagName === 'INPUT';
 
   let newText = '';
 
-  if (selection && !selection.isCollapsed && selectedEditor.contains(selection.anchorNode)) {
-    newText = selection.toString().trim();
-    currentSelection = selection.getRangeAt(0).cloneRange();
-  } else {
-    // Use full editor content if no selection
-    newText = selectedEditor.innerText.trim();
+  if (isInputElement) {
+    // For heading inputs, just get the current value
+    newText = selectedEditor.value?.trim() || '';
     currentSelection = null;
+  } else {
+    // For TipTap editors, check for selection
+    const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+    const editorWin = editorDoc.defaultView || window;
+    const selection = editorWin?.getSelection();
+    const anchorNode = selection?.anchorNode;
+    const anchorElement = anchorNode && anchorNode.nodeType === 1
+      ? anchorNode
+      : anchorNode?.parentElement;
+    // V2: Find TipTap editor instead of Quill
+    const activeEditor = anchorElement?.closest('.tiptap.ProseMirror');
+
+    if (activeEditor && activeEditor !== selectedEditor) {
+      selectedEditor = activeEditor;
+      selectedEditorDoc = activeEditor.ownerDocument || selectedEditorDoc;
+    }
+
+    if (selection && !selection.isCollapsed && selectedEditor.contains(selection.anchorNode)) {
+      newText = selection.toString().trim();
+      currentSelection = selection.getRangeAt(0).cloneRange();
+    } else {
+      // Use full editor content if no selection
+      newText = selectedEditor.innerText.trim();
+      currentSelection = null;
+    }
   }
 
   // Only update if text changed
@@ -1178,32 +1418,49 @@ function replaceTextInEditor(newText) {
   }
 
   try {
-    // Determine the correct window and document for the editor (iframe support)
-    const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
-    const editorWin = editorDoc.defaultView || window;
+    // Check if this is a heading input (not a TipTap editor)
+    const isInputElement = selectedEditor.tagName === 'INPUT';
 
-    // Focus the editor
-    selectedEditor.focus();
+    if (isInputElement) {
+      // For heading inputs, directly set the value
+      selectedEditor.focus();
+      selectedEditor.value = newText;
 
-    if (currentSelection) {
-      // We have a saved selection range - restore it
-      const selection = editorWin.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(currentSelection);
+      // Dispatch input event to notify React of the change
+      const inputEvent = new Event('input', { bubbles: true });
+      selectedEditor.dispatchEvent(inputEvent);
 
-      // Use execCommand on the correct document (works with TipTap's undo stack)
-      editorDoc.execCommand('insertText', false, newText);
+      // Also dispatch change event for good measure
+      const changeEvent = new Event('change', { bubbles: true });
+      selectedEditor.dispatchEvent(changeEvent);
     } else {
-      // No saved selection - replace entire content
-      // Select all content in the editor first
-      const selection = editorWin.getSelection();
-      const range = editorDoc.createRange();
-      range.selectNodeContents(selectedEditor);
-      selection.removeAllRanges();
-      selection.addRange(range);
+      // For TipTap editors, use selection-based replacement
+      const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+      const editorWin = editorDoc.defaultView || window;
 
-      // Replace with new text
-      editorDoc.execCommand('insertText', false, newText);
+      // Focus the editor
+      selectedEditor.focus();
+
+      if (currentSelection) {
+        // We have a saved selection range - restore it
+        const selection = editorWin.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(currentSelection);
+
+        // Use execCommand on the correct document (works with TipTap's undo stack)
+        editorDoc.execCommand('insertText', false, newText);
+      } else {
+        // No saved selection - replace entire content
+        // Select all content in the editor first
+        const selection = editorWin.getSelection();
+        const range = editorDoc.createRange();
+        range.selectNodeContents(selectedEditor);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        // Replace with new text
+        editorDoc.execCommand('insertText', false, newText);
+      }
     }
 
     showToast('✓ Text replaced!');

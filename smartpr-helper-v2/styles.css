@@ -624,8 +624,8 @@
 /* Block Icon (appears on each paragraph block) */
 .sph-block-icon {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 4px;
+  right: -40px;
   width: 32px;
   height: 32px;
   border-radius: 8px;
