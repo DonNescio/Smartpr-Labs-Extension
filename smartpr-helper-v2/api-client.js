@@ -261,9 +261,9 @@ function isValidEmail(email) {
 }
 
 /**
- * Process paragraph text (grammar, translate, shorten, lengthen)
+ * Process paragraph text (grammar, rephrase, synonyms, translate, shorten)
  * @param {string} text - The text to process
- * @param {string} action - The action: 'grammar', 'translate', 'shorter', 'longer'
+ * @param {string} action - The action: 'grammar', 'rephrase', 'synonyms', 'translate', 'shorter'
  * @param {object} options - Additional options (e.g., { targetLanguage: 'Dutch' } for translate)
  * @returns {Promise<object>} - Processed text result
  */

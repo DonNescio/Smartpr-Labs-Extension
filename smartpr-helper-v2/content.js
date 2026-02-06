@@ -320,6 +320,8 @@ function addParagraphIcon(element, iframeDoc = null, elementType = 'tiptap') {
     registerParagraphSelectionListener(doc);
     handleParagraphSelectionChange(doc);
   } else {
+    // Mark as focus-managed so clearVisibleParagraphIcons() won't clear it
+    iconBtn.dataset.focusManaged = 'true';
     // For heading inputs, show icon on focus instead of selection
     element.addEventListener('focus', () => setParagraphIconVisible(element, true));
     element.addEventListener('blur', () => {
@@ -572,7 +574,7 @@ function initDialogWatcher() {
   });
 }
 
-// Reset detection state when dialog closes
+// Reset editor-related state when editor dialog closes
 function resetDetectionState() {
   // Clean up editor iframe watching
   if (editorIframeObserver) {
@@ -580,10 +582,6 @@ function resetDetectionState() {
     editorIframeObserver = null;
   }
   editorIframe = null;
-
-  // Clean up subject field
-  detachSubjectListeners();
-  subjectField = null;
 
   // Clean up floating icon overlay (it's safe, it's outside React's DOM)
   if (iconOverlayContainer) {
@@ -597,6 +595,23 @@ function resetDetectionState() {
   selectedEditorDoc = null;
   selectedText = '';
   currentSelection = null;
+
+  // Re-detect subject field (it may still be in the DOM behind the closed dialog)
+  const field = findSubjectField();
+  if (field && field !== subjectField) {
+    subjectField = field;
+    if (!subjectListenersAttached) {
+      subjectField.addEventListener('focus', handleSubjectFocus);
+      subjectField.addEventListener('input', handleSubjectInput);
+      subjectListenersAttached = true;
+    }
+    lastSubjectValue = subjectField.value;
+  } else if (field && field === subjectField && !subjectListenersAttached) {
+    // Same field but listeners were lost — reattach
+    subjectField.addEventListener('focus', handleSubjectFocus);
+    subjectField.addEventListener('input', handleSubjectInput);
+    subjectListenersAttached = true;
+  }
 }
 
 function initParagraphCoach() {
@@ -1000,9 +1015,10 @@ function openEditorContextSidebar() {
       <span class="sph-label">What you can do</span>
       <div class="sph-help-list" style="font-size: 13px; color: #374151; line-height: 1.6;">
         <div style="margin-bottom: 8px;">✓ Fix spelling & grammar</div>
+        <div style="margin-bottom: 8px;">🔄 Rephrase paragraph</div>
+        <div style="margin-bottom: 8px;">💡 Suggest synonyms</div>
         <div style="margin-bottom: 8px;">🌐 Translate to other languages</div>
         <div style="margin-bottom: 8px;">📝 Make text shorter</div>
-        <div style="margin-bottom: 8px;">📄 Make text longer</div>
       </div>
     </div>
   `;
@@ -1189,6 +1205,14 @@ function showParagraphCoachContent() {
           <span class="sph-action-icon">✓</span>
           <span class="sph-action-label">Fix Spelling & Grammar</span>
         </button>
+        <button class="sph-action-btn" id="action-rephrase">
+          <span class="sph-action-icon">🔄</span>
+          <span class="sph-action-label">Rephrase Paragraph</span>
+        </button>
+        <button class="sph-action-btn" id="action-synonyms">
+          <span class="sph-action-icon">💡</span>
+          <span class="sph-action-label">Suggest Synonyms</span>
+        </button>
         <button class="sph-action-btn" id="action-translate">
           <span class="sph-action-icon">🌐</span>
           <span class="sph-action-label">Translate</span>
@@ -1197,19 +1221,16 @@ function showParagraphCoachContent() {
           <span class="sph-action-icon">📝</span>
           <span class="sph-action-label">Make Shorter</span>
         </button>
-        <button class="sph-action-btn" id="action-longer">
-          <span class="sph-action-icon">📄</span>
-          <span class="sph-action-label">Make Longer</span>
-        </button>
       </div>
     </div>
   `;
 
   // Attach event listeners
   $('#action-grammar').addEventListener('click', () => handleParagraphAction('grammar'));
+  $('#action-rephrase').addEventListener('click', () => handleParagraphAction('rephrase'));
+  $('#action-synonyms').addEventListener('click', () => handleParagraphAction('synonyms'));
   $('#action-translate').addEventListener('click', () => showTranslateOptions());
   $('#action-shorter').addEventListener('click', () => handleParagraphAction('shorter'));
-  $('#action-longer').addEventListener('click', () => handleParagraphAction('longer'));
 }
 
 function showTranslateOptions() {
@@ -1292,14 +1313,17 @@ async function handleParagraphAction(action, options = {}) {
       case 'grammar':
         loadingMessage = 'Checking spelling & grammar...';
         break;
+      case 'rephrase':
+        loadingMessage = 'Rephrasing paragraph...';
+        break;
+      case 'synonyms':
+        loadingMessage = 'Finding synonyms...';
+        break;
       case 'translate':
         loadingMessage = `Translating to ${options.targetLanguage}...`;
         break;
       case 'shorter':
         loadingMessage = 'Making text shorter...';
-        break;
-      case 'longer':
-        loadingMessage = 'Expanding text...';
         break;
     }
 
@@ -1325,14 +1349,17 @@ function showParagraphResult(resultText, action, options = {}) {
     case 'grammar':
       actionLabel = 'Corrected Text';
       break;
+    case 'rephrase':
+      actionLabel = 'Rephrased Text';
+      break;
+    case 'synonyms':
+      actionLabel = 'Synonym Suggestions';
+      break;
     case 'translate':
       actionLabel = `Translated to ${options.targetLanguage}`;
       break;
     case 'shorter':
       actionLabel = 'Shortened Text';
-      break;
-    case 'longer':
-      actionLabel = 'Expanded Text';
       break;
   }
 
