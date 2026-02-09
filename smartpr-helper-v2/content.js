@@ -351,7 +351,7 @@ function addParagraphIcon(element, iframeDoc = null, elementType = 'tiptap') {
   // Create floating icon
   const iconBtn = doc.createElement('button');
   iconBtn.className = 'sph-block-icon';
-  iconBtn.innerHTML = '✨';
+  iconBtn.innerHTML = `<img src="${chrome.runtime.getURL('logo-white.png')}" alt="Smart.pr" style="width:24px;height:24px;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(45,27,78,0.2))" />`;
   iconBtn.title = 'Improve with AI';
   iconBtn._targetElement = element; // Store reference for position updates
 
@@ -438,7 +438,7 @@ function injectStylesIntoIframe(iframeDoc) {
       width: 32px;
       height: 32px;
       border: none;
-      border-radius: 8px;
+      border-radius: 50%;
       background: linear-gradient(135deg, #FFD580 0%, #FFBC7F 50%, #E8B5E8 100%);
       color: white;
       font-size: 16px;
