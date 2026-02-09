@@ -284,6 +284,7 @@ async function processParagraph(text, action, options = {}) {
 
     return {
       text: response.text,
+      synonyms: response.synonyms || null,
       usage: response.usage
     };
 

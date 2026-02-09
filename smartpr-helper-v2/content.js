@@ -1485,7 +1485,11 @@ async function handleParagraphAction(action, options = {}) {
 
     const result = await window.SmartPRAPI.processParagraph(text, action, options);
 
-    showParagraphResult(result.text, action, options);
+    if (action === 'synonyms') {
+      showSynonymResult(result);
+    } else {
+      showParagraphResult(result.text, action, options);
+    }
     showToast('✨ Done!');
 
   } catch (error) {
@@ -2158,14 +2162,11 @@ function detectCurrentContext() {
   // Only use tracked state set by the dialog watcher (not broad DOM searches
   // which can match unrelated inputs on the page)
 
-  // Check for subject field (only if already detected and still in DOM)
-  if (subjectField && subjectField.isConnected && !subjectField.disabled && !subjectField.readOnly) {
-    return { mode: 'subject', value: subjectField.value.trim(), onSmartPr: true };
-  }
+  // Check for editor first (highest priority — when the editor is open,
+  // the paragraph coach is the main tool the user needs)
 
   // Check for classic editor (only if already tracked and still in DOM)
   if (editorIframe && editorIframe.isConnected) {
-    // Check for text selection inside the editor iframe
     const selText = getEditorSelectionText(editorIframe);
     return { mode: 'editor', selectedText: selText || '', onSmartPr: true };
   }
@@ -2174,6 +2175,11 @@ function detectCurrentContext() {
   const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
   if (beeIframes.length > 0) {
     return { mode: 'editor', selectedText: '', onSmartPr: true };
+  }
+
+  // Check for subject field (only if already detected and still in DOM)
+  if (subjectField && subjectField.isConnected && !subjectField.disabled && !subjectField.readOnly) {
+    return { mode: 'subject', value: subjectField.value.trim(), onSmartPr: true };
   }
 
   return { mode: 'none', onSmartPr: true };
