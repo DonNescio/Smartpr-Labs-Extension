@@ -1,12 +1,17 @@
 /* Smart.pr Helper - Content Script (V2 React App) */
 
+// ========== Frame Context Detection ==========
+const isBeePluginFrame = window.location.hostname.includes('getbee.io');
+const isTopFrame = window === window.top;
+
 // ========== Utilities ==========
 // Get the top-level document (sidebar lives there, not in iframes)
+// In BeePlugin frame, falls back to current document (cross-origin)
 const getTopDocument = () => {
   try {
     return window.top.document;
   } catch (e) {
-    // Cross-origin, fall back to current document
+    // Cross-origin (BeePlugin iframe), fall back to current document
     return document;
   }
 };
@@ -57,6 +62,9 @@ let editorIframe = null;
 let editorIframeObserver = null;
 let dialogObserver = null;
 
+// Pro editor (BeePlugin/TinyMCE) state
+let proEditorObserver = null;
+
 function findTipTapEditors(doc = document) {
   // Find all TipTap editor elements (ProseMirror-based)
   let editors = Array.from(doc.querySelectorAll('.tiptap.ProseMirror[contenteditable="true"]'));
@@ -93,6 +101,39 @@ function findAllEditableBlocks(doc = document) {
 
   return [...tipTapEditors, ...headingInputs];
 }
+
+// ========== Pro Editor (BeePlugin/TinyMCE) Detection ==========
+
+// Find TinyMCE editors in the pro editor
+function findTinyMCEEditors(doc = document) {
+  return Array.from(doc.querySelectorAll('.mce-content-body[contenteditable="true"]'));
+}
+
+// Find all editable blocks in the pro editor
+function findProEditorBlocks(doc = document) {
+  const editors = findTinyMCEEditors(doc);
+  return editors.map(element => ({
+    element,
+    type: 'tiptap', // Use tiptap behavior (selection-based icon visibility) since they're contenteditable
+    doc
+  }));
+}
+
+// Get the pro editor container for a TinyMCE element
+function getProEditorContainer(editor) {
+  return editor.closest('.module-box') || editor.closest('[data-tiny-wrapper]') || editor.parentElement;
+}
+
+// Get block type from a pro editor module-box container
+function getProBlockType(container) {
+  if (!container) return 'text';
+  if (container.classList?.contains('module-box--heading')) return 'heading';
+  if (container.classList?.contains('module-box--paragraph')) return 'paragraph';
+  if (container.classList?.contains('module-box--text')) return 'paragraph';
+  return 'text';
+}
+
+// ========== Classic Editor (TipTap/ProseMirror) Detection ==========
 
 // Find the blob iframe that contains the V2 editor
 function findEditorIframe() {
@@ -150,7 +191,11 @@ function findEditorsInBlobIframe() {
 }
 
 function getEditorContainer(editor) {
-  // V2: Walk up to find .block-wrapper
+  // Pro editor: Walk up to find .module-box
+  const moduleBox = editor.closest('.module-box');
+  if (moduleBox) return moduleBox;
+
+  // Classic editor: Walk up to find .block-wrapper
   const blockWrapper = editor.closest('.block-wrapper');
   if (blockWrapper) return blockWrapper;
 
@@ -161,7 +206,12 @@ function getEditorContainer(editor) {
 function getBlockType(container) {
   if (!container) return 'text';
 
-  // V2: Check for heading/subheading inputs inside block-wrapper
+  // Pro editor: Check module-box type classes
+  if (container.classList?.contains('module-box')) {
+    return getProBlockType(container);
+  }
+
+  // Classic editor: Check for heading/subheading inputs inside block-wrapper
   if (container.classList?.contains('block-wrapper')) {
     // Check for h1 with input (heading block)
     if (container.querySelector('h1 > input')) return 'heading';
@@ -189,8 +239,8 @@ function getActiveEditorFromSelection(doc) {
   const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
   const node = range?.commonAncestorContainer || selection.anchorNode || selection.focusNode;
   const element = node && node.nodeType === 1 ? node : node?.parentElement;
-  // V2: Find TipTap editor instead of Quill
-  return element?.closest('.tiptap.ProseMirror') || null;
+  // Find TipTap editor (classic) or TinyMCE editor (pro)
+  return element?.closest('.tiptap.ProseMirror') || element?.closest('.mce-content-body') || null;
 }
 
 function setParagraphIconVisible(editor, isVisible) {
@@ -421,13 +471,25 @@ function injectStylesIntoIframe(iframeDoc) {
 }
 
 function scanAndAddIcons() {
-  // V2: Scan all editable blocks inside the blob iframe
-  const iframeBlocks = findEditorsInBlobIframe();
-  iframeBlocks.forEach(({ element, type, iframeDoc }) => {
-    addParagraphIcon(element, iframeDoc, type);
-  });
+  let count = 0;
 
-  return iframeBlocks.length;
+  if (isBeePluginFrame) {
+    // Pro editor: Scan TinyMCE editors in the current document
+    const proBlocks = findProEditorBlocks(document);
+    proBlocks.forEach(({ element, type }) => {
+      addParagraphIcon(element, null, type);
+    });
+    count = proBlocks.length;
+  } else {
+    // Classic editor: Scan all editable blocks inside the blob iframe
+    const iframeBlocks = findEditorsInBlobIframe();
+    iframeBlocks.forEach(({ element, type, iframeDoc }) => {
+      addParagraphIcon(element, iframeDoc, type);
+    });
+    count = iframeBlocks.length;
+  }
+
+  return count;
 }
 
 // Watch the blob iframe for content changes
@@ -576,12 +638,18 @@ function initDialogWatcher() {
 
 // Reset editor-related state when editor dialog closes
 function resetDetectionState() {
-  // Clean up editor iframe watching
+  // Clean up editor iframe watching (classic editor)
   if (editorIframeObserver) {
     editorIframeObserver.disconnect();
     editorIframeObserver = null;
   }
   editorIframe = null;
+
+  // Clean up pro editor watching
+  if (proEditorObserver) {
+    proEditorObserver.disconnect();
+    proEditorObserver = null;
+  }
 
   // Clean up floating icon overlay (it's safe, it's outside React's DOM)
   if (iconOverlayContainer) {
@@ -614,6 +682,86 @@ function resetDetectionState() {
   }
 }
 
+// ========== Pro Editor (BeePlugin) Initialization ==========
+
+function initProEditor() {
+  if (extensionDisabled) return;
+
+  console.log('[Smart.pr Helper] Initializing pro editor support (BeePlugin frame)');
+
+  const stage = document.querySelector('#sdk-stage');
+  if (stage) {
+    watchProEditorStage(stage);
+    return;
+  }
+
+  // Wait for #sdk-stage to appear
+  const stageObserver = new MutationObserver(() => {
+    const stage = document.querySelector('#sdk-stage');
+    if (stage) {
+      stageObserver.disconnect();
+      watchProEditorStage(stage);
+    }
+  });
+
+  stageObserver.observe(document.body || document.documentElement, {
+    childList: true,
+    subtree: true
+  });
+}
+
+function watchProEditorStage(stage) {
+  if (proEditorObserver) return; // Already watching
+
+  console.log('[Smart.pr Helper] Watching pro editor stage for TinyMCE editors');
+
+  // Initial scan with retry
+  setTimeout(() => {
+    const count = scanAndAddIcons();
+    console.log(`[Smart.pr Helper] Pro editor initial scan found ${count} editors`);
+
+    if (count === 0) {
+      setTimeout(() => {
+        const retryCount = scanAndAddIcons();
+        console.log(`[Smart.pr Helper] Pro editor retry scan found ${retryCount} editors`);
+      }, 500);
+    }
+  }, 200);
+
+  // Watch for new modules being added
+  proEditorObserver = new MutationObserver(() => {
+    if (scanThrottleTimer) return;
+    scanThrottleTimer = setTimeout(() => {
+      scanThrottleTimer = null;
+      scanAndAddIcons();
+      updateAllIconPositions();
+    }, 300);
+  });
+
+  proEditorObserver.observe(stage, {
+    childList: true,
+    subtree: true
+  });
+
+  // Register selection listener on the document
+  registerParagraphSelectionListener(document);
+}
+
+function teardownProEditor() {
+  if (proEditorObserver) {
+    proEditorObserver.disconnect();
+    proEditorObserver = null;
+  }
+
+  if (iconOverlayContainer) {
+    iconOverlayContainer.remove();
+    iconOverlayContainer = null;
+  }
+  elementToIconMap = new WeakMap();
+}
+
+// ========== Classic Editor Initialization ==========
+
 function initParagraphCoach() {
   if (extensionDisabled) return;
 
@@ -635,12 +783,18 @@ function teardownParagraphCoach() {
     dialogObserver = null;
   }
 
-  // V2: Clean up iframe observer
+  // Clean up iframe observer (classic editor)
   if (editorIframeObserver) {
     editorIframeObserver.disconnect();
     editorIframeObserver = null;
   }
   editorIframe = null;
+
+  // Clean up pro editor observer
+  if (proEditorObserver) {
+    proEditorObserver.disconnect();
+    proEditorObserver = null;
+  }
 
   if (editorObserver) {
     editorObserver.disconnect();
@@ -1080,8 +1234,8 @@ function updateSelectedTextFromEditor() {
     const anchorElement = anchorNode && anchorNode.nodeType === 1
       ? anchorNode
       : anchorNode?.parentElement;
-    // V2: Find TipTap editor instead of Quill
-    const activeEditor = anchorElement?.closest('.tiptap.ProseMirror');
+    // Find TipTap editor (classic) or TinyMCE editor (pro)
+    const activeEditor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
 
     if (activeEditor && activeEditor !== selectedEditor) {
       selectedEditor = activeEditor;
@@ -1948,19 +2102,24 @@ function teardownExtensionUI() {
 function applyExtensionState(disabled) {
   extensionDisabled = Boolean(disabled);
   if (extensionDisabled) {
-    teardownExtensionUI();
+    if (isBeePluginFrame) {
+      teardownProEditor();
+    } else {
+      teardownExtensionUI();
+    }
     return;
   }
 
-  // Only run in the top frame for V2 (dialogs and iframes are managed from top)
-  const isTopFrame = window === window.top;
-
-  if (isTopFrame) {
+  if (isBeePluginFrame) {
+    // Pro editor: Run paragraph coach inside the BeePlugin iframe
+    initProEditor();
+  } else if (isTopFrame) {
+    // Top frame on smart.pr: Run floating icon, subject line helper, dialog watcher
     if (!floatingIcon) {
       createFloatingIcon();
     }
 
-    // V2: Single dialog watcher handles both subject field and editor detection
+    // Single dialog watcher handles both subject field and editor detection
     initDialogWatcher();
   }
 }

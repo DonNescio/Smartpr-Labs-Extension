@@ -5,7 +5,9 @@
   "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
-    "https://*.repl.co/*"
+    "https://*.repl.co/*",
+    "https://app.getbee.io/*",
+    "https://*.getbee.io/*"
   ],
   "icons": {
     "16": "app-icon.png",
@@ -22,7 +24,9 @@
       "matches": [
         "https://smart.pr/*",
         "https://*.smart.pr/*",
-        "https://svcs.smart.pr/*"
+        "https://svcs.smart.pr/*",
+        "https://app.getbee.io/*",
+        "https://*.getbee.io/*"
       ],
       "js": ["api-client.js", "content.js"],
       "css": ["styles.css"],
@@ -35,7 +39,12 @@
   "web_accessible_resources": [
     {
       "resources": ["fonts/gelica/*.otf", "logo-white.png"],
-      "matches": ["https://smart.pr/*", "https://*.smart.pr/*"]
+      "matches": [
+        "https://smart.pr/*",
+        "https://*.smart.pr/*",
+        "https://app.getbee.io/*",
+        "https://*.getbee.io/*"
+      ]
     }
   ]
 }
