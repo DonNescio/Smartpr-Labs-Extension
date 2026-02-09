@@ -434,7 +434,120 @@
       border: 1.5px solid rgba(52,211,153,0.25);
       font-weight: 500;
       word-break: break-word;
+      white-space: pre-wrap;
       margin-bottom: 12px;
+    }
+
+    /* Synonym Options */
+    .synonym-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .synonym-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 12px;
+      background: rgba(255, 255, 255, 0.85);
+      border: 1.5px solid rgba(232, 181, 232, 0.25);
+      border-radius: 10px;
+      transition: all 0.2s ease;
+    }
+
+    .synonym-option:hover {
+      border-color: rgba(255, 188, 127, 0.5);
+      background: rgba(255, 255, 255, 0.95);
+    }
+
+    .synonym-text {
+      font-size: 12px;
+      font-weight: 500;
+      color: #2D1B4E;
+      flex: 1;
+      line-height: 1.4;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .synonym-actions {
+      display: flex;
+      gap: 4px;
+      margin-left: 8px;
+      flex-shrink: 0;
+    }
+
+    .synonym-btn {
+      padding: 4px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      font-family: inherit;
+      border-radius: 6px;
+      border: 1px solid rgba(200, 200, 200, 0.4);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      background: rgba(255, 255, 255, 0.9);
+      color: #6B5B8C;
+      white-space: nowrap;
+      min-width: 36px;
+      text-align: center;
+    }
+
+    .synonym-btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .synonym-copy:hover {
+      background: linear-gradient(135deg, #E8B5E8, #D4A5F5);
+      color: white;
+      border-color: transparent;
+    }
+
+    .synonym-inject {
+      background: linear-gradient(135deg, rgba(134,239,172,0.15), rgba(52,211,153,0.15));
+      border-color: rgba(52,211,153,0.35);
+      color: #059669;
+    }
+
+    .synonym-inject:hover {
+      background: linear-gradient(135deg, #34d399, #10b981);
+      color: white;
+      border-color: transparent;
+    }
+
+    /* Grammar - Changes List */
+    .changes-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .change-item {
+      padding: 6px 10px;
+      background: rgba(255, 188, 127, 0.1);
+      border-radius: 6px;
+      font-size: 11px;
+      color: #6B5B8C;
+      line-height: 1.4;
+      border-left: 2px solid rgba(255, 188, 127, 0.5);
+    }
+
+    /* Shorter - Word Count Badge */
+    .word-count-badge {
+      display: inline-block;
+      padding: 3px 10px;
+      background: linear-gradient(135deg, rgba(232, 181, 232, 0.2), rgba(212, 165, 245, 0.2));
+      border: 1px solid rgba(212, 165, 245, 0.35);
+      border-radius: 16px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #6B5B8C;
+      margin-bottom: 8px;
     }
 
     /* CTA text */
@@ -524,6 +637,85 @@
     .settings-link:hover {
       color: #2D1B4E;
     }
+
+    /* Feedback Area */
+    #popup-feedback-area {
+      margin-top: 6px;
+    }
+
+    .popup-feedback-form {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .popup-feedback-textarea {
+      width: 100%;
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1.5px solid rgba(232, 181, 232, 0.3);
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: inherit;
+      color: #2D1B4E;
+      resize: vertical;
+      min-height: 40px;
+      box-sizing: border-box;
+    }
+
+    .popup-feedback-textarea::placeholder {
+      color: #9ca3af;
+    }
+
+    .popup-feedback-textarea:focus {
+      outline: none;
+      border-color: rgba(255, 188, 127, 0.5);
+      background: rgba(255, 255, 255, 0.9);
+    }
+
+    .popup-feedback-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .popup-feedback-send {
+      padding: 4px 12px;
+      background: linear-gradient(135deg, #FFD580, #FFBC7F, #E8B5E8);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .popup-feedback-send:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 6px rgba(255, 188, 127, 0.3);
+    }
+
+    .popup-feedback-send:disabled {
+      opacity: 0.6;
+      cursor: default;
+      transform: none;
+    }
+
+    .popup-feedback-cancel {
+      background: none;
+      border: none;
+      font-family: inherit;
+      font-size: 11px;
+      color: #9ca3af;
+      cursor: pointer;
+      padding: 2px 6px;
+    }
+
+    .popup-feedback-cancel:hover {
+      color: #6b7280;
+    }
   </style>
 </head>
 <body>
@@ -551,6 +743,9 @@
         </label>
       </div>
       <button class="settings-link" id="open-options">Settings</button>
+    </div>
+    <div id="popup-feedback-area">
+      <button class="settings-link" id="popup-feedback-btn">Feedback</button>
     </div>
   </div>
 

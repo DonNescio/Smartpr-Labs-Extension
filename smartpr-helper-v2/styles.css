@@ -872,6 +872,7 @@
   line-height: 1.7;
   border: 2px solid rgba(52, 211, 153, 0.3);
   font-weight: 500;
+  white-space: pre-wrap;
 }
 
 /* Result Actions - Stacked Vertically */
@@ -893,4 +894,217 @@
   margin-bottom: 0;
   padding: 12px 16px;
   font-size: 14px;
+}
+
+/* Synonym Suggestions - Structured Options */
+.sph-synonym-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sph-synonym-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 2px solid rgba(232, 181, 232, 0.25);
+  border-radius: 12px;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(10px);
+}
+
+.sph-synonym-option:hover {
+  border-color: rgba(255, 188, 127, 0.5);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 2px 8px rgba(255, 188, 127, 0.15);
+}
+
+.sph-synonym-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  flex: 1;
+  line-height: 1.4;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.sph-synonym-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: 10px;
+  flex-shrink: 0;
+}
+
+.sph-synonym-btn {
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  border-radius: 8px;
+  border: 1.5px solid rgba(200, 200, 200, 0.4);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 42px;
+  text-align: center;
+}
+
+.sph-synonym-btn:hover {
+  transform: translateY(-1px);
+}
+
+.sph-synonym-copy:hover {
+  background: var(--gradient-cool);
+  color: white;
+  border-color: transparent;
+}
+
+.sph-synonym-inject {
+  background: linear-gradient(135deg, rgba(134, 239, 172, 0.15), rgba(52, 211, 153, 0.15));
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #059669;
+}
+
+.sph-synonym-inject:hover {
+  background: linear-gradient(135deg, #34d399, #10b981);
+  color: white;
+  border-color: transparent;
+}
+
+/* Grammar - Changes List */
+.sph-changes-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sph-change-item {
+  padding: 8px 12px;
+  background: rgba(255, 188, 127, 0.1);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  border-left: 3px solid rgba(255, 188, 127, 0.5);
+}
+
+/* Shorter - Word Count Badge */
+.sph-word-count-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  background: linear-gradient(135deg, rgba(232, 181, 232, 0.2), rgba(212, 165, 245, 0.2));
+  border: 1.5px solid rgba(212, 165, 245, 0.35);
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+/* Sidebar Footer */
+.sph-footer {
+  padding: 12px 24px;
+  border-top: 1px solid rgba(232, 181, 232, 0.2);
+  flex-shrink: 0;
+}
+
+.sph-feedback-link {
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.2s ease;
+}
+
+.sph-feedback-link:hover {
+  color: var(--text-secondary);
+}
+
+/* Feedback Form */
+.sph-feedback-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sph-feedback-textarea {
+  width: 100%;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 2px solid rgba(232, 181, 232, 0.3);
+  border-radius: 10px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-primary);
+  resize: vertical;
+  min-height: 48px;
+  transition: all 0.2s ease;
+  box-sizing: border-box;
+}
+
+.sph-feedback-textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.sph-feedback-textarea:focus {
+  outline: none;
+  border-color: rgba(255, 188, 127, 0.5);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.sph-feedback-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sph-feedback-send {
+  padding: 6px 16px;
+  background: var(--gradient-warm);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.sph-feedback-send:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(255, 188, 127, 0.3);
+}
+
+.sph-feedback-send:disabled {
+  opacity: 0.6;
+  cursor: default;
+  transform: none;
+}
+
+.sph-feedback-cancel {
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  transition: color 0.2s ease;
+}
+
+.sph-feedback-cancel:hover {
+  color: var(--text-secondary);
 }

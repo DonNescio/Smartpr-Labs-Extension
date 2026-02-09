@@ -989,10 +989,13 @@ function createSidebar() {
   sidebar.innerHTML = `
     <div class="sph-header">
       <h2 class="sph-title">Subject Line Helper</h2>
-      <button class="sph-close">×</button>
+      <button class="sph-close">\u00d7</button>
     </div>
     <div class="sph-content" id="sph-content">
       <!-- Content will be dynamically inserted -->
+    </div>
+    <div class="sph-footer" id="sph-footer">
+      <button class="sph-feedback-link" id="sph-feedback-btn">Feedback</button>
     </div>
   `;
 
@@ -1002,7 +1005,68 @@ function createSidebar() {
   const closeBtn = sidebar.querySelector('.sph-close');
   closeBtn.addEventListener('click', closeSidebar);
 
+  // Feedback button
+  initSidebarFeedback();
+
   return sidebar;
+}
+
+function initSidebarFeedback() {
+  const footer = sidebar.querySelector('#sph-footer');
+  const feedbackBtn = footer.querySelector('#sph-feedback-btn');
+
+  feedbackBtn.addEventListener('click', () => {
+    showSidebarFeedbackForm(footer);
+  });
+}
+
+function showSidebarFeedbackForm(footer) {
+  footer.innerHTML = `
+    <div class="sph-feedback-form">
+      <textarea class="sph-feedback-textarea" id="sph-feedback-text" rows="2" placeholder="Tell us what you think..."></textarea>
+      <div class="sph-feedback-actions">
+        <button class="sph-feedback-send" id="sph-feedback-send">Send</button>
+        <button class="sph-feedback-cancel" id="sph-feedback-cancel">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  const textarea = footer.querySelector('#sph-feedback-text');
+  textarea.focus();
+
+  footer.querySelector('#sph-feedback-cancel').addEventListener('click', () => {
+    resetSidebarFeedback(footer);
+  });
+
+  footer.querySelector('#sph-feedback-send').addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+
+    const sendBtn = footer.querySelector('#sph-feedback-send');
+    sendBtn.textContent = 'Sending...';
+    sendBtn.disabled = true;
+
+    try {
+      await window.SmartPRAPI.submitFeedback(text);
+      showToast('\u2713 Feedback sent!');
+      resetSidebarFeedback(footer);
+    } catch (error) {
+      sendBtn.textContent = 'Send';
+      sendBtn.disabled = false;
+      const errorMsg = window.SmartPRAPI.getErrorMessage(error);
+      showToast('Failed to send feedback');
+      console.error('[Smart.pr Helper] Feedback error:', errorMsg);
+    }
+  });
+}
+
+function resetSidebarFeedback(footer) {
+  footer.innerHTML = `
+    <button class="sph-feedback-link" id="sph-feedback-btn">Feedback</button>
+  `;
+  footer.querySelector('#sph-feedback-btn').addEventListener('click', () => {
+    showSidebarFeedbackForm(footer);
+  });
 }
 
 function openSidebar(type) {
@@ -1487,6 +1551,12 @@ async function handleParagraphAction(action, options = {}) {
 
     if (action === 'synonyms') {
       showSynonymResult(result);
+    } else if (action === 'rephrase') {
+      showRephraseResult(result);
+    } else if (action === 'grammar') {
+      showGrammarResult(result);
+    } else if (action === 'shorter') {
+      showShorterResult(result);
     } else {
       showParagraphResult(result.text, action, options);
     }
@@ -1565,6 +1635,307 @@ function showParagraphResult(resultText, action, options = {}) {
   });
 
   // Back button
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function parseSynonymsFromText(text) {
+  const suggestions = [];
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    // Handle "original → syn1, syn2, syn3" format
+    if (line.includes('\u2192') || line.includes('->')) {
+      const arrowParts = line.split(/\u2192|->/).map(s => s.trim());
+      if (arrowParts.length >= 2) {
+        const syns = arrowParts[1].split(',').map(s => s.trim()).filter(Boolean);
+        suggestions.push(...syns);
+        continue;
+      }
+    }
+
+    // Handle numbered list "1. suggestion" or "- suggestion"
+    const listMatch = line.match(/^(?:\d+[.)]\s*|-\s*|\*\s*)(.+)/);
+    if (listMatch) {
+      suggestions.push(listMatch[1].trim());
+      continue;
+    }
+  }
+
+  // If nothing parsed, try comma separation on the whole text
+  if (suggestions.length === 0) {
+    const commaList = text.split(',').map(s => s.trim()).filter(Boolean);
+    if (commaList.length > 1) {
+      suggestions.push(...commaList);
+    }
+  }
+
+  // Last resort: return the whole text as a single suggestion
+  if (suggestions.length === 0 && text.trim()) {
+    suggestions.push(text.trim());
+  }
+
+  return suggestions;
+}
+
+function showSynonymResult(result) {
+  const content = $('#sph-content');
+
+  // Prefer structured synonyms array from API, fall back to text parsing
+  const suggestions = result.synonyms || parseSynonymsFromText(result.text);
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  const synonymOptionsHTML = suggestions.map((syn, i) => `
+    <div class="sph-synonym-option">
+      <span class="sph-synonym-text">${escapeHTML(syn)}</span>
+      <div class="sph-synonym-actions">
+        <button class="sph-synonym-btn sph-synonym-copy" data-index="${i}" title="Copy to clipboard">
+          Copy
+        </button>
+        <button class="sph-synonym-btn sph-synonym-inject" data-index="${i}" title="Replace in editor">
+          Inject
+        </button>
+      </div>
+    </div>
+  `).join('');
+
+  content.innerHTML = `
+    <div class="sph-section">
+      <span class="sph-label">Original</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Synonym Suggestions</span>
+      <div class="sph-synonym-list">
+        ${synonymOptionsHTML}
+      </div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        \u2190 Try Another Action
+      </button>
+    </div>
+  `;
+
+  // Attach event listeners for each synonym option
+  content.querySelectorAll('.sph-synonym-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      await copyToClipboard(suggestions[index]);
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+
+  content.querySelectorAll('.sph-synonym-inject').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.index);
+      replaceTextInEditor(suggestions[index]);
+    });
+  });
+
+  // Back button
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function parseRephraseFromText(text) {
+  const options = [];
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    // Handle numbered list "1. option" or "- option"
+    const listMatch = line.match(/^(?:\d+[.)]\s*|-\s*|\*\s*)(.+)/);
+    if (listMatch) {
+      options.push(listMatch[1].trim());
+      continue;
+    }
+  }
+
+  // If no list format found, treat whole text as a single option
+  if (options.length === 0 && text.trim()) {
+    options.push(text.trim());
+  }
+
+  return options;
+}
+
+function showRephraseResult(result) {
+  const content = $('#sph-content');
+
+  const options = result.rephraseOptions || parseRephraseFromText(result.text);
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  const optionsHTML = options.map((opt, i) => `
+    <div class="sph-synonym-option">
+      <span class="sph-synonym-text">${escapeHTML(opt)}</span>
+      <div class="sph-synonym-actions">
+        <button class="sph-synonym-btn sph-synonym-copy" data-index="${i}" title="Copy to clipboard">
+          Copy
+        </button>
+        <button class="sph-synonym-btn sph-synonym-inject" data-index="${i}" title="Replace in editor">
+          Inject
+        </button>
+      </div>
+    </div>
+  `).join('');
+
+  content.innerHTML = `
+    <div class="sph-section">
+      <span class="sph-label">Original</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Rephrase Options</span>
+      <div class="sph-synonym-list">
+        ${optionsHTML}
+      </div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        \u2190 Try Another Action
+      </button>
+    </div>
+  `;
+
+  content.querySelectorAll('.sph-synonym-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      await copyToClipboard(options[index]);
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+
+  content.querySelectorAll('.sph-synonym-inject').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.index);
+      replaceTextInEditor(options[index]);
+    });
+  });
+
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function showGrammarResult(result) {
+  const content = $('#sph-content');
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  let changesHTML = '';
+  if (result.changes && result.changes.length > 0) {
+    const items = result.changes.map(c => `<li class="sph-change-item">${escapeHTML(c)}</li>`).join('');
+    changesHTML = `
+      <div class="sph-section">
+        <span class="sph-label">Changes Made</span>
+        <ul class="sph-changes-list">${items}</ul>
+      </div>
+    `;
+  }
+
+  content.innerHTML = `
+    <div class="sph-section">
+      <span class="sph-label">Original</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Corrected Text</span>
+      <div class="sph-result-text">${escapeHTML(result.text)}</div>
+    </div>
+    ${changesHTML}
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="replace-text-btn">
+        Replace in Editor
+      </button>
+      <button class="sph-button sph-button-secondary" id="copy-result-btn">
+        Copy to Clipboard
+      </button>
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        \u2190 Try Another Action
+      </button>
+    </div>
+  `;
+
+  $('#replace-text-btn').addEventListener('click', () => {
+    replaceTextInEditor(result.text);
+  });
+
+  $('#copy-result-btn').addEventListener('click', async () => {
+    await copyToClipboard(result.text);
+    const btn = $('#copy-result-btn');
+    btn.textContent = '\u2713 Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy to Clipboard';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function showShorterResult(result) {
+  const content = $('#sph-content');
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  const originalWordCount = selectedText.trim().split(/\s+/).filter(Boolean).length;
+  const newWordCount = result.text.trim().split(/\s+/).filter(Boolean).length;
+
+  content.innerHTML = `
+    <div class="sph-section">
+      <span class="sph-label">Original</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Shortened Text</span>
+      <div class="sph-word-count-badge">${originalWordCount} \u2192 ${newWordCount} words</div>
+      <div class="sph-result-text">${escapeHTML(result.text)}</div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="replace-text-btn">
+        Replace in Editor
+      </button>
+      <button class="sph-button sph-button-secondary" id="copy-result-btn">
+        Copy to Clipboard
+      </button>
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        \u2190 Try Another Action
+      </button>
+    </div>
+  `;
+
+  $('#replace-text-btn').addEventListener('click', () => {
+    replaceTextInEditor(result.text);
+  });
+
+  $('#copy-result-btn').addEventListener('click', async () => {
+    await copyToClipboard(result.text);
+    const btn = $('#copy-result-btn');
+    btn.textContent = '\u2713 Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy to Clipboard';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+
   $('#try-another-btn').addEventListener('click', () => {
     showParagraphCoachContent();
   });

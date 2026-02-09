@@ -285,6 +285,8 @@ async function processParagraph(text, action, options = {}) {
     return {
       text: response.text,
       synonyms: response.synonyms || null,
+      rephraseOptions: response.rephraseOptions || null,
+      changes: response.changes || null,
       usage: response.usage
     };
 
@@ -294,11 +296,29 @@ async function processParagraph(text, action, options = {}) {
   }
 }
 
+/**
+ * Submit user feedback
+ * @param {string} feedback - The feedback text
+ * @returns {Promise<object>} - Response from server
+ */
+async function submitFeedback(feedback) {
+  try {
+    const response = await callProxyAPI('/submit-feedback', {
+      feedback: feedback
+    });
+    return response;
+  } catch (error) {
+    console.error('[API Client] Submit feedback error:', error);
+    throw error;
+  }
+}
+
 // Export for use in other scripts
 window.SmartPRAPI = {
   generateSubjectLines,
   getSubjectFeedback,
   processParagraph,
+  submitFeedback,
   validateUser,
   getErrorMessage,
   isValidEmail,

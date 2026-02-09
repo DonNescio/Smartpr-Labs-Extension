@@ -40,6 +40,67 @@ openOptionsButton.addEventListener('click', () => {
   chrome.runtime.openOptionsPage();
 });
 
+// ========== Feedback ==========
+const popupFeedbackArea = document.getElementById('popup-feedback-area');
+
+function initPopupFeedback() {
+  const btn = document.getElementById('popup-feedback-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      showPopupFeedbackForm();
+    });
+  }
+}
+
+function showPopupFeedbackForm() {
+  popupFeedbackArea.innerHTML = `
+    <div class="popup-feedback-form">
+      <textarea class="popup-feedback-textarea" id="popup-feedback-text" rows="2" placeholder="Tell us what you think..."></textarea>
+      <div class="popup-feedback-actions">
+        <button class="popup-feedback-send" id="popup-feedback-send">Send</button>
+        <button class="popup-feedback-cancel" id="popup-feedback-cancel">Cancel</button>
+      </div>
+    </div>
+  `;
+
+  const textarea = document.getElementById('popup-feedback-text');
+  textarea.focus();
+
+  document.getElementById('popup-feedback-cancel').addEventListener('click', () => {
+    resetPopupFeedback();
+  });
+
+  document.getElementById('popup-feedback-send').addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+
+    const sendBtn = document.getElementById('popup-feedback-send');
+    sendBtn.textContent = 'Sending...';
+    sendBtn.disabled = true;
+
+    try {
+      await window.SmartPRAPI.submitFeedback(text);
+      resetPopupFeedback();
+      // Brief visual confirmation
+      const area = document.getElementById('popup-feedback-area');
+      const origHTML = area.innerHTML;
+      area.innerHTML = '<span style="font-size: 11px; color: #059669; font-weight: 600;">\u2713 Feedback sent!</span>';
+      setTimeout(() => { resetPopupFeedback(); }, 2000);
+    } catch (error) {
+      sendBtn.textContent = 'Send';
+      sendBtn.disabled = false;
+      console.error('[Popup] Feedback error:', error);
+    }
+  });
+}
+
+function resetPopupFeedback() {
+  popupFeedbackArea.innerHTML = '<button class="settings-link" id="popup-feedback-btn">Feedback</button>';
+  initPopupFeedback();
+}
+
+initPopupFeedback();
+
 // ========== Context Detection ==========
 async function detectContext() {
   try {
@@ -488,7 +549,17 @@ async function handlePopupParagraphAction(action, options = {}) {
 
   try {
     const result = await window.SmartPRAPI.processParagraph(text, action, options);
-    renderParagraphResult(result.text, action, options);
+    if (action === 'synonyms') {
+      renderSynonymResult(result);
+    } else if (action === 'rephrase') {
+      renderRephraseResult(result);
+    } else if (action === 'grammar') {
+      renderGrammarResult(result);
+    } else if (action === 'shorter') {
+      renderShorterResult(result);
+    } else {
+      renderParagraphResult(result.text, action, options);
+    }
   } catch (error) {
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     mainContent.innerHTML = `
@@ -540,6 +611,268 @@ function renderParagraphResult(resultText, action, options) {
 
   document.getElementById('copy-result-btn').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(resultText); } catch {}
+    const btn = document.getElementById('copy-result-btn');
+    btn.textContent = '\u2713 Copied';
+    setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
+  });
+
+  document.getElementById('another-action-btn').addEventListener('click', () => {
+    renderParagraphCoachActive(popupSelectedText);
+  });
+}
+
+function popupParseSynonymsFromText(text) {
+  const suggestions = [];
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    if (line.includes('\u2192') || line.includes('->')) {
+      const arrowParts = line.split(/\u2192|->/).map(s => s.trim());
+      if (arrowParts.length >= 2) {
+        const syns = arrowParts[1].split(',').map(s => s.trim()).filter(Boolean);
+        suggestions.push(...syns);
+        continue;
+      }
+    }
+
+    const listMatch = line.match(/^(?:\d+[.)]\s*|-\s*|\*\s*)(.+)/);
+    if (listMatch) {
+      suggestions.push(listMatch[1].trim());
+      continue;
+    }
+  }
+
+  if (suggestions.length === 0) {
+    const commaList = text.split(',').map(s => s.trim()).filter(Boolean);
+    if (commaList.length > 1) {
+      suggestions.push(...commaList);
+    }
+  }
+
+  if (suggestions.length === 0 && text.trim()) {
+    suggestions.push(text.trim());
+  }
+
+  return suggestions;
+}
+
+function renderSynonymResult(result) {
+  const suggestions = result.synonyms || popupParseSynonymsFromText(result.text);
+
+  const originalDisplay = popupSelectedText.length > 100
+    ? popupSelectedText.substring(0, 100) + '...'
+    : popupSelectedText;
+
+  const synonymOptionsHTML = suggestions.map((syn, i) => `
+    <div class="synonym-option">
+      <span class="synonym-text">${escapeHTML(syn)}</span>
+      <div class="synonym-actions">
+        <button class="synonym-btn synonym-copy" data-index="${i}" title="Copy to clipboard">Copy</button>
+        <button class="synonym-btn synonym-inject" data-index="${i}" title="Replace in editor">Inject</button>
+      </div>
+    </div>
+  `).join('');
+
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">Original</span>
+      <div class="subject-value" style="font-size: 12px; opacity: 0.8;">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="section">
+      <span class="section-label">Synonym Suggestions</span>
+      <div class="synonym-list">
+        ${synonymOptionsHTML}
+      </div>
+    </div>
+    <div class="section">
+      <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
+    </div>
+  `;
+
+  document.querySelectorAll('.synonym-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      try { await navigator.clipboard.writeText(suggestions[index]); } catch {}
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+
+  document.querySelectorAll('.synonym-inject').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      await replaceEditorText(suggestions[index]);
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = 'Inject'; }, 2000);
+    });
+  });
+
+  document.getElementById('another-action-btn').addEventListener('click', () => {
+    renderParagraphCoachActive(popupSelectedText);
+  });
+}
+
+function popupParseRephraseFromText(text) {
+  const options = [];
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    const listMatch = line.match(/^(?:\d+[.)]\s*|-\s*|\*\s*)(.+)/);
+    if (listMatch) {
+      options.push(listMatch[1].trim());
+      continue;
+    }
+  }
+
+  if (options.length === 0 && text.trim()) {
+    options.push(text.trim());
+  }
+
+  return options;
+}
+
+function renderRephraseResult(result) {
+  const options = result.rephraseOptions || popupParseRephraseFromText(result.text);
+
+  const originalDisplay = popupSelectedText.length > 100
+    ? popupSelectedText.substring(0, 100) + '...'
+    : popupSelectedText;
+
+  const optionsHTML = options.map((opt, i) => `
+    <div class="synonym-option">
+      <span class="synonym-text">${escapeHTML(opt)}</span>
+      <div class="synonym-actions">
+        <button class="synonym-btn synonym-copy" data-index="${i}" title="Copy to clipboard">Copy</button>
+        <button class="synonym-btn synonym-inject" data-index="${i}" title="Replace in editor">Inject</button>
+      </div>
+    </div>
+  `).join('');
+
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">Original</span>
+      <div class="subject-value" style="font-size: 12px; opacity: 0.8;">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="section">
+      <span class="section-label">Rephrase Options</span>
+      <div class="synonym-list">
+        ${optionsHTML}
+      </div>
+    </div>
+    <div class="section">
+      <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
+    </div>
+  `;
+
+  document.querySelectorAll('.synonym-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      try { await navigator.clipboard.writeText(options[index]); } catch {}
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    });
+  });
+
+  document.querySelectorAll('.synonym-inject').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      await replaceEditorText(options[index]);
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = 'Inject'; }, 2000);
+    });
+  });
+
+  document.getElementById('another-action-btn').addEventListener('click', () => {
+    renderParagraphCoachActive(popupSelectedText);
+  });
+}
+
+function renderGrammarResult(result) {
+  const originalDisplay = popupSelectedText.length > 100
+    ? popupSelectedText.substring(0, 100) + '...'
+    : popupSelectedText;
+
+  let changesHTML = '';
+  if (result.changes && result.changes.length > 0) {
+    const items = result.changes.map(c => `<li class="change-item">${escapeHTML(c)}</li>`).join('');
+    changesHTML = `
+      <div class="section">
+        <span class="section-label">Changes Made</span>
+        <ul class="changes-list">${items}</ul>
+      </div>
+    `;
+  }
+
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">Original</span>
+      <div class="subject-value" style="font-size: 12px; opacity: 0.8;">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="section">
+      <span class="section-label">Corrected Text</span>
+      <div class="result-box">${escapeHTML(result.text)}</div>
+    </div>
+    ${changesHTML}
+    <div class="section">
+      <button class="btn btn-primary" id="replace-btn">Replace in Editor</button>
+      <button class="btn btn-secondary" id="copy-result-btn">Copy to Clipboard</button>
+      <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
+    </div>
+  `;
+
+  document.getElementById('replace-btn').addEventListener('click', async () => {
+    await replaceEditorText(result.text);
+    const btn = document.getElementById('replace-btn');
+    btn.textContent = '\u2713 Replaced!';
+    btn.disabled = true;
+  });
+
+  document.getElementById('copy-result-btn').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(result.text); } catch {}
+    const btn = document.getElementById('copy-result-btn');
+    btn.textContent = '\u2713 Copied';
+    setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
+  });
+
+  document.getElementById('another-action-btn').addEventListener('click', () => {
+    renderParagraphCoachActive(popupSelectedText);
+  });
+}
+
+function renderShorterResult(result) {
+  const originalDisplay = popupSelectedText.length > 100
+    ? popupSelectedText.substring(0, 100) + '...'
+    : popupSelectedText;
+
+  const originalWordCount = popupSelectedText.trim().split(/\s+/).filter(Boolean).length;
+  const newWordCount = result.text.trim().split(/\s+/).filter(Boolean).length;
+
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">Original</span>
+      <div class="subject-value" style="font-size: 12px; opacity: 0.8;">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="section">
+      <span class="section-label">Shortened Text</span>
+      <div class="word-count-badge">${originalWordCount} \u2192 ${newWordCount} words</div>
+      <div class="result-box">${escapeHTML(result.text)}</div>
+    </div>
+    <div class="section">
+      <button class="btn btn-primary" id="replace-btn">Replace in Editor</button>
+      <button class="btn btn-secondary" id="copy-result-btn">Copy to Clipboard</button>
+      <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
+    </div>
+  `;
+
+  document.getElementById('replace-btn').addEventListener('click', async () => {
+    await replaceEditorText(result.text);
+    const btn = document.getElementById('replace-btn');
+    btn.textContent = '\u2713 Replaced!';
+    btn.disabled = true;
+  });
+
+  document.getElementById('copy-result-btn').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(result.text); } catch {}
     const btn = document.getElementById('copy-result-btn');
     btn.textContent = '\u2713 Copied';
     setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
