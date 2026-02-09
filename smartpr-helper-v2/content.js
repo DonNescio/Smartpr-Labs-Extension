@@ -2071,6 +2071,114 @@ function showToast(message) {
   }, 2000);
 }
 
+// ========== Message Handler for Popup ==========
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only handle messages in the top frame (not blob iframes or BeePlugin)
+  if (!isTopFrame) return false;
+
+  if (message.type === 'getContext') {
+    sendResponse(detectCurrentContext());
+    return true;
+  }
+
+  if (message.type === 'setSubjectValue') {
+    const field = subjectField || findSubjectField();
+    if (field) {
+      field.focus();
+      field.value = message.value;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+
+  if (message.type === 'captureEditorSelection') {
+    // Capture the current selection so it can be replaced later
+    if (!editorIframe) { sendResponse({ success: false }); return true; }
+    try {
+      const iframeDoc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      const iframeWin = editorIframe.contentWindow;
+      const selection = iframeWin?.getSelection();
+      if (selection && !selection.isCollapsed && selection.toString().trim()) {
+        const anchorElement = (selection.anchorNode?.nodeType === 1
+          ? selection.anchorNode
+          : selection.anchorNode?.parentElement);
+        const editor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
+        if (editor) {
+          selectedText = selection.toString().trim();
+          selectedEditor = editor;
+          selectedEditorDoc = iframeDoc;
+          currentSelection = selection.getRangeAt(0).cloneRange();
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false });
+        }
+      } else {
+        sendResponse({ success: false });
+      }
+    } catch (e) {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+
+  if (message.type === 'replaceEditorText') {
+    if (selectedEditor) {
+      replaceTextInEditor(message.value);
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+});
+
+function getEditorSelectionText(iframe) {
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    const iframeWin = iframe.contentWindow;
+    if (!iframeDoc || !iframeWin) return '';
+    const selection = iframeWin.getSelection();
+    if (selection && !selection.isCollapsed) {
+      const text = selection.toString().trim();
+      if (text) return text;
+    }
+  } catch (e) {
+    // Cross-origin or other access error
+  }
+  return '';
+}
+
+function detectCurrentContext() {
+  if (extensionDisabled) return { mode: 'disabled', onSmartPr: true };
+
+  // Only use tracked state set by the dialog watcher (not broad DOM searches
+  // which can match unrelated inputs on the page)
+
+  // Check for subject field (only if already detected and still in DOM)
+  if (subjectField && subjectField.isConnected && !subjectField.disabled && !subjectField.readOnly) {
+    return { mode: 'subject', value: subjectField.value.trim(), onSmartPr: true };
+  }
+
+  // Check for classic editor (only if already tracked and still in DOM)
+  if (editorIframe && editorIframe.isConnected) {
+    // Check for text selection inside the editor iframe
+    const selText = getEditorSelectionText(editorIframe);
+    return { mode: 'editor', selectedText: selText || '', onSmartPr: true };
+  }
+
+  // Check for pro editor (BeePlugin iframe)
+  const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
+  if (beeIframes.length > 0) {
+    return { mode: 'editor', selectedText: '', onSmartPr: true };
+  }
+
+  return { mode: 'none', onSmartPr: true };
+}
+
 // ========== Initialization ==========
 function detachSubjectListeners() {
   if (subjectField && subjectListenersAttached) {
