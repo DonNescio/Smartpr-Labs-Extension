@@ -98,7 +98,7 @@ function findHeadingInputs(doc = document) {
   return [...h1Inputs, ...h2Inputs];
 }
 
-// Find all editable blocks (both TipTap editors and heading inputs)
+// Find all editable blocks (TipTap editors, heading inputs, and TinyMCE editors)
 function findAllEditableBlocks(doc = document) {
   const tipTapEditors = findTipTapEditors(doc).map(editor => ({
     element: editor,
@@ -112,7 +112,13 @@ function findAllEditableBlocks(doc = document) {
     doc
   }));
 
-  return [...tipTapEditors, ...headingInputs];
+  const tinyMCEEditors = findTinyMCEEditors(doc).map(editor => ({
+    element: editor,
+    type: 'tiptap',
+    doc
+  }));
+
+  return [...tipTapEditors, ...headingInputs, ...tinyMCEEditors];
 }
 
 // ========== Pro Editor (BeePlugin/TinyMCE) Detection ==========
@@ -264,9 +270,9 @@ function setParagraphIconVisible(editor, isVisible) {
 }
 
 function clearVisibleParagraphIcons() {
-  // Only clear selection-managed icons (TipTap), not focus-managed icons (headings)
+  // Only clear icons managed by document selectionchange (TipTap), not input-managed (headings)
   paragraphIconDocs.forEach((doc) => {
-    doc.querySelectorAll('.sph-block-icon.sph-visible:not([data-focus-managed])').forEach((icon) => {
+    doc.querySelectorAll('.sph-block-icon.sph-visible:not([data-input-managed])').forEach((icon) => {
       icon.classList.remove('sph-visible');
     });
   });
@@ -383,10 +389,16 @@ function addParagraphIcon(element, iframeDoc = null, elementType = 'tiptap') {
     registerParagraphSelectionListener(doc);
     handleParagraphSelectionChange(doc);
   } else {
-    // Mark as focus-managed so clearVisibleParagraphIcons() won't clear it
-    iconBtn.dataset.focusManaged = 'true';
-    // For heading inputs, show icon on focus instead of selection
-    element.addEventListener('focus', () => setParagraphIconVisible(element, true));
+    // Heading icons are managed by input events, not document selectionchange
+    iconBtn.dataset.inputManaged = 'true';
+    // For heading inputs, show icon only when text is selected (like TipTap blocks)
+    const checkInputSelection = () => {
+      const hasSelection = element.selectionStart !== element.selectionEnd;
+      setParagraphIconVisible(element, hasSelection);
+    };
+    element.addEventListener('select', checkInputSelection);
+    element.addEventListener('keyup', checkInputSelection);
+    element.addEventListener('mouseup', checkInputSelection);
     element.addEventListener('blur', () => {
       // Delay hiding to allow click on icon
       setTimeout(() => setParagraphIconVisible(element, false), 200);
@@ -688,21 +700,22 @@ function resetDetectionState() {
   selectedText = '';
   currentSelection = null;
 
+  // Close sidebar if it was in paragraph/editor mode (editor is gone)
+  if (currentSidebarMode === 'paragraph') {
+    closeSidebar();
+  }
+
+  // Reset listener flag — the DOM element may have been recreated by React
+  subjectListenersAttached = false;
+
   // Re-detect subject field (it may still be in the DOM behind the closed dialog)
   const field = findSubjectField();
-  if (field && field !== subjectField) {
+  if (field) {
     subjectField = field;
-    if (!subjectListenersAttached) {
-      subjectField.addEventListener('focus', handleSubjectFocus);
-      subjectField.addEventListener('input', handleSubjectInput);
-      subjectListenersAttached = true;
-    }
-    lastSubjectValue = subjectField.value;
-  } else if (field && field === subjectField && !subjectListenersAttached) {
-    // Same field but listeners were lost — reattach
     subjectField.addEventListener('focus', handleSubjectFocus);
     subjectField.addEventListener('input', handleSubjectInput);
     subjectListenersAttached = true;
+    lastSubjectValue = subjectField.value;
   }
 }
 
@@ -2067,6 +2080,21 @@ async function handleParagraphAction(action, options = {}) {
     }
 
     showLoadingState(loadingMessage, action);
+
+    // Gather surrounding text as language context for the API
+    if (selectedEditor && !options.context) {
+      try {
+        const doc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+        const blocks = findAllEditableBlocks(doc);
+        const contextParts = blocks.map(b =>
+          b.element.value !== undefined ? b.element.value : b.element.innerText
+        ).filter(t => t && t.trim());
+        const context = contextParts.join('\n').trim();
+        if (context && context !== text) {
+          options.context = context.substring(0, 500);
+        }
+      } catch (e) { /* context is best-effort */ }
+    }
 
     const result = await window.SmartPRAPI.processParagraph(text, action, options);
 
