@@ -1388,7 +1388,7 @@ function openEditorContextSidebar() {
 
 // ========== Smart Summary ==========
 
-function getFullMailingContent() {
+async function getFullMailingContent() {
   let body = '';
 
   // Classic editor: extract from all editable blocks in the blob iframe
@@ -1406,13 +1406,50 @@ function getFullMailingContent() {
     }
   }
 
-  // Pro editor: use the context passed via postMessage
-  if (!body && proEditorContext) {
-    body = proEditorContext;
+  // Pro editor: request full content from BeePlugin iframe via postMessage
+  if (!body) {
+    const beeFrame = proEditorSource || getBeePluginWindow();
+    if (beeFrame) {
+      try {
+        body = await requestBeePluginContent(beeFrame);
+      } catch (e) {
+        console.warn('[Smart.pr Helper] Could not get content from BeePlugin:', e);
+      }
+    }
   }
 
   const subject = subjectField?.value?.trim() || '';
   return { subject, body };
+}
+
+function getBeePluginWindow() {
+  const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
+  for (const iframe of beeIframes) {
+    try {
+      if (iframe.contentWindow) return iframe.contentWindow;
+    } catch (e) {}
+  }
+  return null;
+}
+
+function requestBeePluginContent(targetWindow) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      window.removeEventListener('message', handler);
+      reject(new Error('Timeout waiting for BeePlugin content'));
+    }, 3000);
+
+    function handler(e) {
+      if (e.data?.type === 'sph:mailing-content-response') {
+        clearTimeout(timeout);
+        window.removeEventListener('message', handler);
+        resolve(e.data.body || '');
+      }
+    }
+
+    window.addEventListener('message', handler);
+    targetWindow.postMessage({ type: 'sph:get-mailing-content' }, '*');
+  });
 }
 
 const FORMAT_LABELS = {
@@ -1472,7 +1509,7 @@ async function showSummaryFormatSelector() {
 async function handleSummarize(format) {
   if (extensionDisabled) return;
 
-  const { subject, body } = getFullMailingContent();
+  const { subject, body } = await getFullMailingContent();
 
   if (!body) {
     showError('No mailing content found. Make sure the editor has some text.');
@@ -3729,8 +3766,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'getMailingContent') {
-    const { subject, body } = getFullMailingContent();
-    sendResponse({ subject, body });
+    getFullMailingContent().then(({ subject, body }) => {
+      sendResponse({ subject, body });
+    });
     return true;
   }
 });
@@ -3960,6 +3998,18 @@ if (isBeePluginFrame) {
         sidebarOpenInTop = false;
         try { CSS.highlights?.delete('sph-selection'); } catch (e) {}
         break;
+
+      case 'sph:get-mailing-content': {
+        const blocks = findAllEditableBlocks(document);
+        const fullBody = blocks.map(b =>
+          b.element.value !== undefined ? b.element.value : b.element.innerText
+        ).filter(t => t && t.trim()).join('\n').trim();
+        window.top.postMessage({
+          type: 'sph:mailing-content-response',
+          body: fullBody
+        }, '*');
+        break;
+      }
     }
   });
 
