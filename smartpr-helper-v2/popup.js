@@ -251,6 +251,7 @@ const POPUP_PROGRESSIVE_MESSAGES = {
   synonyms: ['Finding synonyms...', 'Searching the thesaurus...', 'Picking the best words...', 'Almost ready...'],
   translate: ['Translating text...', 'Finding the right words...', 'Preserving meaning...', 'Wrapping up...'],
   shorter: ['Making text shorter...', 'Trimming the excess...', 'Keeping what matters...', 'Nearly done...'],
+  summarize: ['Reading your mailing...', 'Identifying key points...', 'Crafting summary...', 'Almost done...'],
   default: ['Processing...', 'Working on it...', 'Hang tight...', 'Almost there...']
 };
 
@@ -268,7 +269,7 @@ function showPopupLoading(message = 'Generating...', action = null) {
       <div class="popup-skeleton popup-skeleton-card cascade-item" style="animation-delay: 100ms"></div>
       <div class="popup-skeleton popup-skeleton-card cascade-item" style="animation-delay: 200ms"></div>
     `;
-  } else if (action === 'grammar' || action === 'translate' || action === 'shorter') {
+  } else if (action === 'grammar' || action === 'translate' || action === 'shorter' || action === 'summarize') {
     skeletonHTML = `
       <div class="popup-skeleton popup-skeleton-label"></div>
       <div class="popup-skeleton popup-skeleton-text"></div>
@@ -572,7 +573,13 @@ function renderParagraphCoachIdle() {
         <div class="action-list-item"><span class="action-list-icon">\uD83D\uDCDD</span> Make Shorter</div>
       </div>
     </div>
+    <div class="section">
+      <span class="section-label">Or work with the full mailing</span>
+      <button class="btn btn-primary" id="popup-summarize-btn">Summarize Mailing</button>
+    </div>
   `;
+
+  document.getElementById('popup-summarize-btn').addEventListener('click', () => renderPopupSummaryFormatSelector());
 }
 
 function renderParagraphCoachActive(text) {
@@ -608,6 +615,10 @@ function renderParagraphCoachActive(text) {
         </button>
       </div>
     </div>
+    <div class="section">
+      <span class="section-label">Full Mailing</span>
+      <button class="btn btn-secondary" id="popup-summarize-btn">Summarize Mailing</button>
+    </div>
   `;
 
   mainContent.querySelectorAll('[data-action]').forEach(btn => {
@@ -622,6 +633,8 @@ function renderParagraphCoachActive(text) {
       }
     });
   });
+
+  document.getElementById('popup-summarize-btn').addEventListener('click', () => renderPopupSummaryFormatSelector());
 }
 
 function renderToneSelector() {
@@ -1353,6 +1366,148 @@ function renderPopupKBMarkup(text) {
   return parts.join('')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/`(.+?)`/g, '<code>$1</code>');
+}
+
+// ========== Smart Summary ==========
+
+const POPUP_FORMAT_LABELS = {
+  oneliner: 'One-liner',
+  pitch: 'Short Pitch',
+  executive: 'Executive Summary',
+  bullets: 'Bullet Points'
+};
+
+async function getMailingContentFromTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return { subject: '', body: '' };
+    const response = await chrome.tabs.sendMessage(tab.id, { type: 'getMailingContent' });
+    return response || { subject: '', body: '' };
+  } catch {
+    return { subject: '', body: '' };
+  }
+}
+
+function renderPopupSummaryFormatSelector() {
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">Choose a summary format</span>
+      <div class="action-grid">
+        <button class="action-grid-btn cascade-item" data-fmt="oneliner" style="animation-delay: 0ms">
+          <span class="action-grid-icon">\u270F\uFE0F</span>
+          <span class="action-grid-label">One-liner</span>
+          <span class="action-grid-desc">~20 words</span>
+        </button>
+        <button class="action-grid-btn cascade-item" data-fmt="pitch" style="animation-delay: 60ms">
+          <span class="action-grid-icon">\uD83D\uDCAC</span>
+          <span class="action-grid-label">Short Pitch</span>
+          <span class="action-grid-desc">2-3 sentences</span>
+        </button>
+        <button class="action-grid-btn cascade-item" data-fmt="executive" style="animation-delay: 120ms">
+          <span class="action-grid-icon">\uD83D\uDCCB</span>
+          <span class="action-grid-label">Executive Summary</span>
+          <span class="action-grid-desc">~100 words</span>
+        </button>
+        <button class="action-grid-btn cascade-item" data-fmt="bullets" style="animation-delay: 180ms">
+          <span class="action-grid-icon">\uD83D\uDCCC</span>
+          <span class="action-grid-label">Bullet Points</span>
+          <span class="action-grid-desc">4-6 key facts</span>
+        </button>
+      </div>
+    </div>
+    <div class="section">
+      <button class="btn btn-secondary" id="summary-back-btn">\u2190 Back</button>
+    </div>
+  `;
+
+  mainContent.querySelectorAll('[data-fmt]').forEach(btn => {
+    btn.addEventListener('click', () => handlePopupSummarize(btn.dataset.fmt));
+  });
+
+  document.getElementById('summary-back-btn').addEventListener('click', () => {
+    renderForContext(currentContext);
+  });
+}
+
+async function handlePopupSummarize(format) {
+  if (popupBusy) return;
+  popupBusy = true;
+
+  showPopupLoading('Reading your mailing...', 'summarize');
+
+  try {
+    const { subject, body } = await getMailingContentFromTab();
+
+    if (!body) {
+      mainContent.innerHTML = `
+        <div class="popup-error">No mailing content found. Make sure the editor has some text.</div>
+        <div class="section">
+          <button class="btn btn-secondary" id="summary-error-back">\u2190 Back</button>
+        </div>
+      `;
+      document.getElementById('summary-error-back').addEventListener('click', () => renderPopupSummaryFormatSelector());
+      return;
+    }
+
+    const result = await window.SmartPRAPI.summarizeMailing(subject, body, format);
+
+    if (popupLoadingMessageTimer) {
+      clearInterval(popupLoadingMessageTimer);
+      popupLoadingMessageTimer = null;
+    }
+
+    renderPopupSummaryResult(result.summary, format);
+
+  } catch (error) {
+    if (popupLoadingMessageTimer) {
+      clearInterval(popupLoadingMessageTimer);
+      popupLoadingMessageTimer = null;
+    }
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    mainContent.innerHTML = `
+      <div class="popup-error">${escapeHTML(errorMessage)}</div>
+      <div class="section">
+        <button class="btn btn-primary" id="retry-summary-btn">Try Again</button>
+        <button class="btn btn-secondary" id="summary-error-back">\u2190 Back</button>
+      </div>
+    `;
+    document.getElementById('retry-summary-btn').addEventListener('click', () => handlePopupSummarize(format));
+    document.getElementById('summary-error-back').addEventListener('click', () => renderPopupSummaryFormatSelector());
+  } finally {
+    popupBusy = false;
+  }
+}
+
+function renderPopupSummaryResult(summary, format) {
+  const formatLabel = POPUP_FORMAT_LABELS[format] || 'Summary';
+
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">${escapeHTML(formatLabel)}</span>
+      <div class="result-box" id="popup-summary-result"></div>
+    </div>
+    <div class="section">
+      <button class="btn btn-primary" id="copy-summary-btn" disabled>Copy to Clipboard</button>
+      <button class="btn btn-secondary" id="another-format-btn">\u2190 Try Another Format</button>
+    </div>
+  `;
+
+  const resultEl = document.getElementById('popup-summary-result');
+  const copyBtn = document.getElementById('copy-summary-btn');
+
+  popupTypewriterEffect(resultEl, summary).then(() => {
+    copyBtn.disabled = false;
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(summary); } catch {}
+    copyBtn.textContent = '\u2713 Copied';
+    setTimeout(() => { copyBtn.textContent = 'Copy to Clipboard'; }, 2000);
+  });
+
+  document.getElementById('another-format-btn').addEventListener('click', () => {
+    renderPopupSummaryFormatSelector();
+  });
 }
 
 // ========== Cleanup on popup close ==========

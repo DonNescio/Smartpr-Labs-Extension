@@ -1346,7 +1346,7 @@ function openEditorContextSidebar() {
   updateFloatingIcon(true);
   hideIconBadge();
 
-  // Show helpful prompt to select text
+  // Show helpful prompt to select text + summarize option
   const content = $('#sph-content');
   content.innerHTML = `
     <div class="sph-empty">
@@ -1368,10 +1368,200 @@ function openEditorContextSidebar() {
         <div style="margin-bottom: 8px;">📝 Make text shorter</div>
       </div>
     </div>
+    <div class="sph-section">
+      <span class="sph-label">Or work with the full mailing</span>
+      <button class="sph-button" id="summarize-mailing-btn">
+        Summarize Mailing
+      </button>
+    </div>
   `;
+
+  // Summarize button
+  const summarizeBtn = content.querySelector('#summarize-mailing-btn');
+  if (summarizeBtn) {
+    summarizeBtn.addEventListener('click', () => showSummaryFormatSelector());
+  }
 
   // Watch for text selection while sidebar is open
   startEditorSelectionWatcher();
+}
+
+// ========== Smart Summary ==========
+
+function getFullMailingContent() {
+  let body = '';
+
+  // Classic editor: extract from all editable blocks in the blob iframe
+  if (editorIframe) {
+    try {
+      const doc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      if (doc) {
+        const blocks = findAllEditableBlocks(doc);
+        body = blocks.map(b =>
+          b.element.value !== undefined ? b.element.value : b.element.innerText
+        ).filter(t => t && t.trim()).join('\n').trim();
+      }
+    } catch (e) {
+      console.warn('[Smart.pr Helper] Could not extract mailing content from iframe:', e);
+    }
+  }
+
+  // Pro editor: use the context passed via postMessage
+  if (!body && proEditorContext) {
+    body = proEditorContext;
+  }
+
+  const subject = subjectField?.value?.trim() || '';
+  return { subject, body };
+}
+
+const FORMAT_LABELS = {
+  oneliner: 'One-liner',
+  pitch: 'Short Pitch',
+  executive: 'Executive Summary',
+  bullets: 'Bullet Points'
+};
+
+async function showSummaryFormatSelector() {
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">Choose a summary format</span>
+      <div class="sph-action-buttons">
+        <button class="sph-action-btn sph-cascade-item" id="fmt-oneliner" style="animation-delay: 0ms">
+          <span class="sph-action-icon">✏️</span>
+          <span class="sph-action-label">One-liner</span>
+          <span class="sph-action-desc">Single sentence, ~20 words</span>
+        </button>
+        <button class="sph-action-btn sph-cascade-item" id="fmt-pitch" style="animation-delay: 60ms">
+          <span class="sph-action-icon">💬</span>
+          <span class="sph-action-label">Short Pitch</span>
+          <span class="sph-action-desc">2-3 sentences, email-friendly</span>
+        </button>
+        <button class="sph-action-btn sph-cascade-item" id="fmt-executive" style="animation-delay: 120ms">
+          <span class="sph-action-icon">📋</span>
+          <span class="sph-action-label">Executive Summary</span>
+          <span class="sph-action-desc">One paragraph, ~100 words</span>
+        </button>
+        <button class="sph-action-btn sph-cascade-item" id="fmt-bullets" style="animation-delay: 180ms">
+          <span class="sph-action-icon">📌</span>
+          <span class="sph-action-label">Bullet Points</span>
+          <span class="sph-action-desc">Key facts, 4-6 bullets</span>
+        </button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button sph-button-secondary" id="summary-back-btn">
+        ← Back
+      </button>
+    </div>
+  `);
+
+  $('#fmt-oneliner').addEventListener('click', () => handleSummarize('oneliner'));
+  $('#fmt-pitch').addEventListener('click', () => handleSummarize('pitch'));
+  $('#fmt-executive').addEventListener('click', () => handleSummarize('executive'));
+  $('#fmt-bullets').addEventListener('click', () => handleSummarize('bullets'));
+  $('#summary-back-btn').addEventListener('click', () => {
+    if (selectedText) {
+      showParagraphCoachContent();
+    } else {
+      openEditorContextSidebar();
+    }
+  });
+}
+
+async function handleSummarize(format) {
+  if (extensionDisabled) return;
+
+  const { subject, body } = getFullMailingContent();
+
+  if (!body) {
+    showError('No mailing content found. Make sure the editor has some text.');
+    return;
+  }
+
+  try {
+    showLoadingState('Reading your mailing...', 'summarize');
+
+    const result = await window.SmartPRAPI.summarizeMailing(subject, body, format);
+
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+
+    showSummaryResult(result.summary, format);
+    showToast('✨ Done!');
+
+  } catch (error) {
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+    console.error('[Smart.pr Helper] Summarize error:', error);
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showSummaryError(errorMessage, format);
+  }
+}
+
+async function showSummaryResult(summary, format) {
+  const formatLabel = FORMAT_LABELS[format] || 'Summary';
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${escapeHTML(formatLabel)}</span>
+      <div class="sph-result-text" id="summary-result-text"></div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="copy-summary-btn" disabled>
+        Copy to Clipboard
+      </button>
+      <button class="sph-button sph-button-secondary" id="another-format-btn">
+        ← Try Another Format
+      </button>
+    </div>
+  `);
+
+  const resultEl = $('#summary-result-text');
+  const copyBtn = $('#copy-summary-btn');
+
+  typewriterEffect(resultEl, summary).then(() => {
+    copyBtn.disabled = false;
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    await copyToClipboard(summary);
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = '✓ Copied';
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = 'Copy to Clipboard';
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  });
+
+  $('#another-format-btn').addEventListener('click', () => {
+    showSummaryFormatSelector();
+  });
+}
+
+function showSummaryError(message, format) {
+  const content = $('#sph-content');
+  content.innerHTML = `
+    <div class="sph-error">
+      <div class="sph-error-text">${escapeHTML(message)}</div>
+    </div>
+    <div class="sph-section" style="margin-top: 16px;">
+      <button class="sph-button" id="retry-summary-btn">
+        Try Again
+      </button>
+      <button class="sph-button sph-button-secondary" id="summary-error-back-btn" style="margin-top: 10px;">
+        ← Back
+      </button>
+    </div>
+  `;
+
+  content.querySelector('#retry-summary-btn').addEventListener('click', () => handleSummarize(format));
+  content.querySelector('#summary-error-back-btn').addEventListener('click', () => showSummaryFormatSelector());
 }
 
 // ========== Knowledge Base Sidebar ==========
@@ -1978,6 +2168,12 @@ async function showParagraphCoachContent() {
         </button>
       </div>
     </div>
+    <div class="sph-section">
+      <span class="sph-label">Full Mailing</span>
+      <button class="sph-button sph-button-secondary" id="summarize-mailing-btn">
+        Summarize Mailing
+      </button>
+    </div>
   `);
 
   // Attach event listeners
@@ -1986,6 +2182,7 @@ async function showParagraphCoachContent() {
   $('#action-synonyms').addEventListener('click', () => handleParagraphAction('synonyms'));
   $('#action-translate').addEventListener('click', () => showTranslateOptions());
   $('#action-shorter').addEventListener('click', () => handleParagraphAction('shorter'));
+  $('#summarize-mailing-btn').addEventListener('click', () => showSummaryFormatSelector());
 }
 
 async function showToneSelector() {
@@ -2914,6 +3111,12 @@ const PROGRESSIVE_MESSAGES = {
     'Keeping what matters...',
     'Nearly done...'
   ],
+  summarize: [
+    'Reading your mailing...',
+    'Identifying key points...',
+    'Crafting summary...',
+    'Almost done...'
+  ],
   kb: [
     'Let me look that up...',
     'Going through the details...',
@@ -2945,7 +3148,7 @@ function showLoadingState(message = 'Generating suggestions...', action = null) 
       <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 100ms"></div>
       <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 200ms"></div>
     `;
-  } else if (action === 'grammar' || action === 'translate' || action === 'shorter') {
+  } else if (action === 'grammar' || action === 'translate' || action === 'shorter' || action === 'summarize') {
     skeletonHTML = `
       <div class="sph-skeleton sph-skeleton-label"></div>
       <div class="sph-skeleton sph-skeleton-text"></div>
@@ -3522,6 +3725,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       sendResponse({ success: false });
     }
+    return true;
+  }
+
+  if (message.type === 'getMailingContent') {
+    const { subject, body } = getFullMailingContent();
+    sendResponse({ subject, body });
     return true;
   }
 });

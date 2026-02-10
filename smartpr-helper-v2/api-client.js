@@ -361,6 +361,41 @@ async function askKnowledgeBase(question, conversationId = null) {
   }
 }
 
+/**
+ * Summarize full mailing content in a chosen format
+ * @param {string} subject - The mailing subject line
+ * @param {string} body - The full mailing body text
+ * @param {string} format - One of: 'oneliner', 'pitch', 'executive', 'bullets'
+ * @param {object} options - Additional options
+ * @returns {Promise<object>} - { summary, usage }
+ */
+async function summarizeMailing(subject, body, format, options = {}) {
+  try {
+    const response = await callProxyAPI('/summarize', {
+      subject,
+      body,
+      format,
+      options
+    }, { timeout: 45000 });
+
+    if (!response.success || !response.summary) {
+      throw {
+        code: 'INVALID_RESPONSE',
+        message: 'Invalid response from server'
+      };
+    }
+
+    return {
+      summary: response.summary,
+      usage: response.usage
+    };
+
+  } catch (error) {
+    console.error('[API Client] Summarize mailing error:', error);
+    throw error;
+  }
+}
+
 // Export for use in other scripts
 window.SmartPRAPI = {
   generateSubjectLines,
@@ -368,6 +403,7 @@ window.SmartPRAPI = {
   processParagraph,
   submitFeedback,
   askKnowledgeBase,
+  summarizeMailing,
   validateUser,
   getErrorMessage,
   isValidEmail,
