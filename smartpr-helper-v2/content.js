@@ -1016,7 +1016,10 @@ function createSidebar() {
   sidebar.id = 'smartpr-helper-sidebar';
   sidebar.innerHTML = `
     <div class="sph-header">
-      <h2 class="sph-title">Subject Line Helper</h2>
+      <div class="sph-header-left">
+        <button class="sph-back" title="Back to Ask me anything"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8,1 3,6 8,11"/></svg></button>
+        <h2 class="sph-title">Subject Line Helper</h2>
+      </div>
       <button class="sph-close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="13" y2="13"/><line x1="13" y1="1" x2="1" y2="13"/></svg></button>
     </div>
     <div class="sph-content" id="sph-content">
@@ -1033,10 +1036,29 @@ function createSidebar() {
   const closeBtn = sidebar.querySelector('.sph-close');
   closeBtn.addEventListener('click', closeSidebar);
 
+  // Back button — returns to Knowledge Base
+  const backBtn = sidebar.querySelector('.sph-back');
+  backBtn.addEventListener('click', () => {
+    stopSelectionTracking();
+    stopSubjectFieldTracking();
+    openKnowledgeBaseSidebar();
+  });
+
   // Feedback button
   initSidebarFeedback();
 
+  // Initially hide back button (KB is default home)
+  updateBackButton();
+
   return sidebar;
+}
+
+function updateBackButton() {
+  if (!sidebar) return;
+  const backBtn = sidebar.querySelector('.sph-back');
+  if (backBtn) {
+    backBtn.style.display = currentSidebarMode === 'kb' ? 'none' : 'flex';
+  }
 }
 
 function initSidebarFeedback() {
@@ -1105,6 +1127,7 @@ function openSidebar(type) {
   }
 
   currentSidebarMode = 'subject';
+  updateBackButton();
 
   // Update sidebar title for subject line mode
   const title = sidebar.querySelector('.sph-title');
@@ -1182,6 +1205,13 @@ function openSidebarFromIcon() {
     }
   }
 
+  // Check for pro editor (BeePlugin iframe) — editors run inside it, not in a blob iframe
+  const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
+  if (beeIframes.length > 0) {
+    openEditorContextSidebar();
+    return;
+  }
+
   // Check if subject field is actually present and connected in the DOM
   const activeSubjectField = subjectField && subjectField.isConnected ? subjectField : findSubjectField();
   if (activeSubjectField) {
@@ -1221,6 +1251,7 @@ function openParagraphCoachSidebar() {
   }
 
   currentSidebarMode = 'paragraph';
+  updateBackButton();
 
   // Update sidebar title
   const title = sidebar.querySelector('.sph-title');
@@ -1247,6 +1278,7 @@ function openEditorContextSidebar() {
   }
 
   currentSidebarMode = 'paragraph';
+  updateBackButton();
 
   // Update sidebar title
   const title = sidebar.querySelector('.sph-title');
@@ -1294,10 +1326,11 @@ function openKnowledgeBaseSidebar() {
   }
 
   currentSidebarMode = 'kb';
+  updateBackButton();
 
   const title = sidebar.querySelector('.sph-title');
   if (title) {
-    title.textContent = 'Knowledge Base';
+    title.textContent = 'Ask me anything';
   }
 
   sidebar.classList.add('open');
@@ -1315,23 +1348,23 @@ async function showKBEmptyState() {
   await setContentWithTransition(`
     <div class="sph-section">
       <div class="sph-empty" style="padding: 24px;">
-        <div class="sph-empty-icon" style="font-size: 48px;">📚</div>
+        <div class="sph-empty-icon"><img src="${chrome.runtime.getURL('logo-smart.png')}" alt="Smart.pr" style="width:48px;height:48px;object-fit:contain;display:block;margin:0 auto;"></div>
         <div class="sph-empty-text">
-          <strong>Ask anything about Smart.pr</strong>
+          <strong>I know Smart.pr inside out</strong>
           <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
-            Get help with the platform or PR writing best practices.
+            Platform questions, PR tips, how-tos — just ask.
           </p>
         </div>
       </div>
     </div>
     <div class="sph-section sph-kb-input-section">
       <div class="sph-kb-input-row">
-        <input type="text" id="kb-question-input" class="sph-input sph-kb-input" placeholder="Ask a question...">
+        <input type="text" id="kb-question-input" class="sph-input sph-kb-input" placeholder="What do you need help with?">
         <button class="sph-kb-ask-btn" id="kb-ask-btn">Ask</button>
       </div>
     </div>
     <div class="sph-section">
-      <span class="sph-label">Suggested Questions</span>
+      <span class="sph-label">Try asking</span>
       <div class="sph-kb-suggestions">
         <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 0ms" data-q="How do I schedule a mailing?">How do I schedule a mailing?</button>
         <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 60ms" data-q="What makes a good press release subject line?">What makes a good PR subject line?</button>
@@ -1426,6 +1459,7 @@ async function showKBConversation(isLoading, errorMessage) {
 
   let loadingHTML = '';
   if (isLoading) {
+    const kbMessages = PROGRESSIVE_MESSAGES.kb;
     loadingHTML = `
       <div class="sph-kb-message sph-kb-assistant">
         <div class="sph-kb-typing">
@@ -1433,8 +1467,39 @@ async function showKBConversation(isLoading, errorMessage) {
           <span class="sph-kb-typing-dot"></span>
           <span class="sph-kb-typing-dot"></span>
         </div>
+        <div class="sph-kb-loading-text">${kbMessages[0]}</div>
       </div>
     `;
+
+    // Clear any previous timer
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+
+    // Cycle through progressive messages
+    let msgIndex = 1;
+    loadingMessageTimer = setInterval(() => {
+      const el = getTopDocument().querySelector('.sph-kb-loading-text');
+      if (el && msgIndex < kbMessages.length) {
+        el.style.opacity = '0';
+        setTimeout(() => {
+          el.textContent = kbMessages[msgIndex];
+          el.style.opacity = '1';
+          msgIndex++;
+        }, 200);
+      }
+      if (msgIndex >= kbMessages.length) {
+        clearInterval(loadingMessageTimer);
+        loadingMessageTimer = null;
+      }
+    }, 2500);
+  } else {
+    // Clear timer when loading ends
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
   }
 
   let errorHTML = '';
@@ -1669,13 +1734,39 @@ function stopSelectionTracking() {
 function updateSelectedTextFromEditor() {
   if (!selectedEditor || currentSidebarMode !== 'paragraph') return;
 
-  // Check if this is a heading input
-  const isInputElement = selectedEditor.tagName === 'INPUT';
-
+  const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+  const editorWin = editorDoc.defaultView || window;
   let newText = '';
 
+  // Check if focus/selection has moved to a different block
+  const activeElement = editorDoc.activeElement;
+  const selection = editorWin?.getSelection();
+  const anchorNode = selection?.anchorNode;
+  const anchorElement = anchorNode && anchorNode.nodeType === 1
+    ? anchorNode : anchorNode?.parentElement;
+
+  // Detect if we've moved into a heading input
+  const isHeadingInput = activeElement?.tagName === 'INPUT' &&
+    activeElement.closest('.block-wrapper') &&
+    (activeElement.closest('h1') || activeElement.closest('h2'));
+
+  if (isHeadingInput && activeElement !== selectedEditor) {
+    // Switched to a heading input
+    selectedEditor = activeElement;
+    selectedEditorDoc = editorDoc;
+  }
+
+  // Detect if we've moved into a different TipTap/TinyMCE block
+  const activeContentEditor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
+  if (activeContentEditor && activeContentEditor !== selectedEditor) {
+    selectedEditor = activeContentEditor;
+    selectedEditorDoc = activeContentEditor.ownerDocument || selectedEditorDoc;
+  }
+
+  // Now read text from whichever editor is current
+  const isInputElement = selectedEditor.tagName === 'INPUT';
+
   if (isInputElement) {
-    // For heading inputs, use selected portion if any, otherwise full value
     const selStart = selectedEditor.selectionStart;
     const selEnd = selectedEditor.selectionEnd;
     if (selStart !== selEnd) {
@@ -1685,27 +1776,10 @@ function updateSelectedTextFromEditor() {
     }
     currentSelection = null;
   } else {
-    // For TipTap editors, check for selection
-    const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
-    const editorWin = editorDoc.defaultView || window;
-    const selection = editorWin?.getSelection();
-    const anchorNode = selection?.anchorNode;
-    const anchorElement = anchorNode && anchorNode.nodeType === 1
-      ? anchorNode
-      : anchorNode?.parentElement;
-    // Find TipTap editor (classic) or TinyMCE editor (pro)
-    const activeEditor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
-
-    if (activeEditor && activeEditor !== selectedEditor) {
-      selectedEditor = activeEditor;
-      selectedEditorDoc = activeEditor.ownerDocument || selectedEditorDoc;
-    }
-
     if (selection && !selection.isCollapsed && selectedEditor.contains(selection.anchorNode)) {
       newText = selection.toString().trim();
       currentSelection = selection.getRangeAt(0).cloneRange();
     } else {
-      // Use full editor content if no selection
       newText = selectedEditor.innerText.trim();
       currentSelection = null;
     }
@@ -1732,6 +1806,15 @@ function updateSelectedTextDisplay() {
     : selectedText;
 
   selectedTextDisplay.innerHTML = escapeHTML(displayText);
+
+  // Also update the block type label when switching between blocks
+  const label = selectedTextDisplay.previousElementSibling;
+  if (label && label.classList.contains('sph-label')) {
+    const container = selectedEditor ? selectedEditor.closest('.block-wrapper') : null;
+    const blockType = container ? getBlockType(container) : 'text';
+    const typeLabel = blockType === 'heading' ? 'Heading' : blockType === 'subheading' ? 'Subheading' : 'Text';
+    label.textContent = `Selected ${typeLabel}`;
+  }
 }
 
 // ========== Subject Field Live Tracking ==========
@@ -2732,10 +2815,10 @@ const PROGRESSIVE_MESSAGES = {
     'Nearly done...'
   ],
   kb: [
-    'Searching knowledge base...',
-    'Reading the docs...',
+    'Let me look that up...',
+    'Going through the details...',
     'Putting together an answer...',
-    'Almost there...'
+    'One moment...'
   ],
   default: [
     'Processing...',

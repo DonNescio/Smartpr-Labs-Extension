@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Smart.pr Assistant",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
@@ -38,7 +38,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["fonts/gelica/*.otf", "logo-white.png"],
+      "resources": ["fonts/gelica/*.otf", "logo-white.png", "logo-smart.png"],
       "matches": [
         "https://smart.pr/*",
         "https://*.smart.pr/*",

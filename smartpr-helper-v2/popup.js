@@ -1150,15 +1150,15 @@ async function renderPopupKBEmpty() {
   await setPopupContentWithTransition(`
     <div class="section">
       <div style="text-align: center; padding: 16px 0;">
-        <div style="font-size: 36px; margin-bottom: 8px;">📚</div>
-        <strong>Ask anything about Smart.pr</strong>
+        <div style="margin-bottom: 8px;"><img src="logo-smart.png" alt="Smart.pr" style="width:36px;height:36px;object-fit:contain;display:block;margin:0 auto;"></div>
+        <strong>I know Smart.pr inside out</strong>
         <p style="margin-top: 6px; color: #6b7280; font-size: 13px;">
-          Get help with the platform or PR writing best practices.
+          Platform questions, PR tips, how-tos — just ask.
         </p>
       </div>
     </div>
     <div class="section">
-      <span class="section-label">Suggested Questions</span>
+      <span class="section-label">Try asking</span>
       <div class="popup-kb-suggestions">
         <button class="popup-kb-suggestion-btn cascade-item" style="animation-delay: 0ms" data-q="How do I schedule a mailing?">How do I schedule a mailing?</button>
         <button class="popup-kb-suggestion-btn cascade-item" style="animation-delay: 60ms" data-q="What makes a good press release subject line?">What makes a good PR subject line?</button>
@@ -1167,7 +1167,7 @@ async function renderPopupKBEmpty() {
     </div>
     <div class="section popup-kb-input-section">
       <div class="popup-kb-input-row">
-        <input type="text" id="popup-kb-input" class="popup-textarea popup-kb-input" placeholder="Ask a question..." style="min-height: auto; resize: none;">
+        <input type="text" id="popup-kb-input" class="popup-textarea popup-kb-input" placeholder="What do you need help with?" style="min-height: auto; resize: none;">
         <button class="popup-kb-ask-btn" id="popup-kb-ask-btn">Ask</button>
       </div>
     </div>
