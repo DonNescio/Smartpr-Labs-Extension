@@ -53,6 +53,12 @@ let paragraphIconDocs = new Set();
 let undoState = null; // { editor, editorDoc, originalText, selection, isInput }
 let undoToastTimer = null;
 
+// Cross-frame state (pro editor in BeePlugin iframe ↔ top frame sidebar)
+let proEditorSource = null;       // Top frame: BeePlugin window ref for postMessage
+let proEditorBlockType = 'text';  // Top frame: block type received from BeePlugin
+let proEditorContext = '';         // Top frame: editor context received from BeePlugin
+let sidebarOpenInTop = false;     // BeePlugin frame: sidebar is managed by top frame
+
 // Knowledge Base state
 let kbConversation = [];        // [{ role: 'user'|'assistant', text, citations? }]
 let kbConversationId = null;    // OpenAI conversation ID for follow-ups
@@ -436,11 +442,38 @@ function addParagraphIcon(element, iframeDoc = null, elementType = 'tiptap') {
       return;
     }
 
-    selectedText = text;
-    selectedEditor = element;
-    selectedEditorDoc = iframeDoc; // Store reference for later
+    if (isBeePluginFrame) {
+      // Store editor ref locally for inject-back
+      selectedEditor = element;
+      selectedEditorDoc = iframeDoc;
 
-    openParagraphCoachSidebar();
+      // Gather block type and context for the top frame
+      const container = element.closest('.block-wrapper') || element.closest('.module-box');
+      const blockType = container ? getBlockType(container) : 'text';
+      const blocks = findAllEditableBlocks(document);
+      const contextParts = blocks.map(b =>
+        b.element.value !== undefined ? b.element.value : b.element.innerText
+      ).filter(t => t && t.trim());
+      const context = contextParts.join('\n').trim().substring(0, 500);
+
+      // Preserve visual selection highlight while sidebar has focus
+      if (currentSelection && CSS.highlights) {
+        try { CSS.highlights.set('sph-selection', new Highlight(currentSelection)); } catch (e) {}
+      }
+
+      sidebarOpenInTop = true;
+      window.top.postMessage({
+        type: 'sph:open-sidebar',
+        text: text,
+        blockType: blockType,
+        context: context
+      }, '*');
+    } else {
+      selectedText = text;
+      selectedEditor = element;
+      selectedEditorDoc = iframeDoc; // Store reference for later
+      openParagraphCoachSidebar();
+    }
   });
 }
 
@@ -483,6 +516,9 @@ function injectStylesIntoIframe(iframeDoc) {
     .sph-block-icon:hover {
       transform: scale(1.1);
       box-shadow: 0 4px 12px rgba(212, 165, 245, 0.5);
+    }
+    ::highlight(sph-selection) {
+      background-color: rgba(0, 120, 215, 0.3);
     }
   `;
   iframeDoc.head.appendChild(style);
@@ -1254,6 +1290,13 @@ function closeSidebar() {
   }
   stopSelectionTracking();
   stopSubjectFieldTracking();
+
+  // Notify BeePlugin frame that sidebar closed
+  if (proEditorSource) {
+    try { proEditorSource.postMessage({ type: 'sph:sidebar-closed' }, '*'); } catch (e) {}
+    proEditorSource = null;
+    proEditorContext = '';
+  }
 }
 
 // ========== Paragraph Coach Sidebar ==========
@@ -1823,8 +1866,10 @@ function updateSelectedTextDisplay() {
   // Also update the block type label when switching between blocks
   const label = selectedTextDisplay.previousElementSibling;
   if (label && label.classList.contains('sph-label')) {
-    const container = selectedEditor ? selectedEditor.closest('.block-wrapper') : null;
-    const blockType = container ? getBlockType(container) : 'text';
+    const container = selectedEditor
+      ? (selectedEditor.closest('.block-wrapper') || selectedEditor.closest('.module-box'))
+      : null;
+    const blockType = container ? getBlockType(container) : (proEditorSource ? proEditorBlockType : 'text');
     const typeLabel = blockType === 'heading' ? 'Heading' : blockType === 'subheading' ? 'Subheading' : 'Text';
     label.textContent = `Selected ${typeLabel}`;
   }
@@ -1891,9 +1936,11 @@ function updateSubjectFieldDisplay() {
 async function showParagraphCoachContent() {
   if (extensionDisabled) return;
 
-  // V2: Get block type from the editor's .block-wrapper container
-  const container = selectedEditor ? selectedEditor.closest('.block-wrapper') : null;
-  const blockType = container ? getBlockType(container) : 'text';
+  // V2: Get block type from the editor's container, or from remote frame
+  const container = selectedEditor
+    ? (selectedEditor.closest('.block-wrapper') || selectedEditor.closest('.module-box'))
+    : null;
+  const blockType = container ? getBlockType(container) : (proEditorSource ? proEditorBlockType : 'text');
   const typeLabel = blockType === 'heading' ? 'Heading' : blockType === 'subheading' ? 'Subheading' : 'Text';
 
   // Truncate long text for display
@@ -2082,18 +2129,22 @@ async function handleParagraphAction(action, options = {}) {
     showLoadingState(loadingMessage, action);
 
     // Gather surrounding text as language context for the API
-    if (selectedEditor && !options.context) {
-      try {
-        const doc = selectedEditorDoc || selectedEditor.ownerDocument || document;
-        const blocks = findAllEditableBlocks(doc);
-        const contextParts = blocks.map(b =>
-          b.element.value !== undefined ? b.element.value : b.element.innerText
-        ).filter(t => t && t.trim());
-        const context = contextParts.join('\n').trim();
-        if (context && context !== text) {
-          options.context = context.substring(0, 500);
-        }
-      } catch (e) { /* context is best-effort */ }
+    if (!options.context) {
+      if (selectedEditor) {
+        try {
+          const doc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+          const blocks = findAllEditableBlocks(doc);
+          const contextParts = blocks.map(b =>
+            b.element.value !== undefined ? b.element.value : b.element.innerText
+          ).filter(t => t && t.trim());
+          const context = contextParts.join('\n').trim();
+          if (context && context !== text) {
+            options.context = context.substring(0, 500);
+          }
+        } catch (e) { /* context is best-effort */ }
+      } else if (proEditorContext) {
+        options.context = proEditorContext;
+      }
     }
 
     const result = await window.SmartPRAPI.processParagraph(text, action, options);
@@ -2559,6 +2610,19 @@ async function showParagraphError(message, action, options) {
 }
 
 function replaceTextInEditor(newText) {
+  // Editor is in BeePlugin frame — delegate via postMessage
+  if (!selectedEditor && proEditorSource) {
+    proEditorSource.postMessage({ type: 'sph:replace-text', text: newText }, '*');
+    const replaceBtn = $('#replace-text-btn');
+    if (replaceBtn) triggerSparkle(replaceBtn);
+    undoState = { proEditor: true }; // Marker so performUndo knows to delegate
+    showUndoToast();
+    currentSelection = null;
+    selectedText = '';
+    setTimeout(() => closeSidebar(), 1000);
+    return;
+  }
+
   if (!selectedEditor) {
     showToast('Unable to replace text. Please select text again.');
     return;
@@ -2674,6 +2738,14 @@ function showUndoToast() {
 
 function performUndo() {
   if (!undoState) return;
+
+  // Editor is in BeePlugin frame — delegate via postMessage
+  if (undoState.proEditor && proEditorSource) {
+    proEditorSource.postMessage({ type: 'sph:undo-replace' }, '*');
+    undoState = null;
+    return;
+  }
+
   const { editor, editorDoc, originalText, newText, isInput } = undoState;
 
   try {
@@ -3550,6 +3622,173 @@ function applyExtensionState(disabled) {
     // Single dialog watcher handles both subject field and editor detection
     initDialogWatcher();
   }
+}
+
+// ========== Cross-Frame Messaging (Pro Editor ↔ Top Frame) ==========
+
+if (isTopFrame) {
+  window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data.type !== 'string' || !e.data.type.startsWith('sph:')) return;
+
+    switch (e.data.type) {
+      case 'sph:open-sidebar':
+        proEditorSource = e.source;
+        proEditorBlockType = e.data.blockType || 'text';
+        proEditorContext = e.data.context || '';
+        selectedText = e.data.text;
+        selectedEditor = null;
+        selectedEditorDoc = null;
+        currentSelection = null;
+        openParagraphCoachSidebar();
+        break;
+
+      case 'sph:selection-update':
+        if (currentSidebarMode !== 'paragraph') return;
+        selectedText = e.data.text;
+        proEditorBlockType = e.data.blockType || proEditorBlockType;
+        updateSelectedTextDisplay();
+        break;
+
+      case 'sph:replace-done':
+        break;
+
+      case 'sph:undo-done':
+        showToast(e.data.success ? '↩ Undone!' : (e.data.message || 'Undo failed.'));
+        break;
+    }
+  });
+}
+
+if (isBeePluginFrame) {
+  // Listen for commands from top frame
+  window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data.type !== 'string' || !e.data.type.startsWith('sph:')) return;
+
+    switch (e.data.type) {
+      case 'sph:replace-text': {
+        if (!selectedEditor) return;
+        try {
+          const newText = e.data.text;
+          const isInputElement = selectedEditor.tagName === 'INPUT';
+
+          // Save undo state locally
+          undoState = {
+            editor: selectedEditor,
+            editorDoc: selectedEditorDoc || selectedEditor.ownerDocument || document,
+            originalText: isInputElement ? selectedEditor.value : selectedText,
+            newText: newText,
+            isInput: isInputElement
+          };
+
+          if (isInputElement) {
+            selectedEditor.focus();
+            selectedEditor.value = newText;
+            selectedEditor.dispatchEvent(new Event('input', { bubbles: true }));
+            selectedEditor.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+            const editorWin = editorDoc.defaultView || window;
+            selectedEditor.focus();
+
+            if (currentSelection) {
+              const selection = editorWin.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(currentSelection);
+              editorDoc.execCommand('insertText', false, newText);
+            } else {
+              const selection = editorWin.getSelection();
+              const range = editorDoc.createRange();
+              range.selectNodeContents(selectedEditor);
+              selection.removeAllRanges();
+              selection.addRange(range);
+              editorDoc.execCommand('insertText', false, newText);
+            }
+          }
+
+          currentSelection = null;
+          selectedText = '';
+          try { CSS.highlights?.delete('sph-selection'); } catch (e) {}
+          window.top.postMessage({ type: 'sph:replace-done' }, '*');
+        } catch (err) {
+          console.error('[Smart.pr Helper] Pro editor replace error:', err);
+        }
+        break;
+      }
+
+      case 'sph:undo-replace': {
+        if (!undoState) {
+          window.top.postMessage({ type: 'sph:undo-done', success: false, message: 'Nothing to undo.' }, '*');
+          return;
+        }
+        try {
+          const { editor, editorDoc, originalText, newText, isInput } = undoState;
+          if (isInput) {
+            editor.focus();
+            editor.value = originalText;
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+            editor.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            const editorWin = editorDoc.defaultView || window;
+            editor.focus();
+            const range = findTextRange(editor, newText, editorDoc);
+            if (range) {
+              const sel = editorWin.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              editorDoc.execCommand('insertText', false, originalText);
+            }
+          }
+          undoState = null;
+          window.top.postMessage({ type: 'sph:undo-done', success: true }, '*');
+        } catch (err) {
+          console.error('[Smart.pr Helper] Pro editor undo error:', err);
+          window.top.postMessage({ type: 'sph:undo-done', success: false, message: 'Undo failed.' }, '*');
+        }
+        break;
+      }
+
+      case 'sph:sidebar-closed':
+        sidebarOpenInTop = false;
+        try { CSS.highlights?.delete('sph-selection'); } catch (e) {}
+        break;
+    }
+  });
+
+  // Track selection changes and forward to top frame when sidebar is open there
+  document.addEventListener('selectionchange', () => {
+    if (!sidebarOpenInTop) return;
+    if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !selection.toString().trim()) return;
+
+      const anchorNode = selection.anchorNode;
+      const anchorElement = anchorNode && anchorNode.nodeType === 1
+        ? anchorNode : anchorNode?.parentElement;
+      const editor = anchorElement?.closest('.mce-content-body');
+      if (!editor) return;
+
+      const text = selection.toString().trim();
+      selectedEditor = editor;
+      selectedEditorDoc = editor.ownerDocument || document;
+      currentSelection = selection.getRangeAt(0).cloneRange();
+      selectedText = text;
+
+      // Update visual highlight to match new selection
+      if (CSS.highlights) {
+        try { CSS.highlights.set('sph-selection', new Highlight(currentSelection)); } catch (e) {}
+      }
+
+      const container = editor.closest('.module-box');
+      const blockType = container ? getBlockType(container) : 'text';
+
+      window.top.postMessage({
+        type: 'sph:selection-update',
+        text: text,
+        blockType: blockType
+      }, '*');
+    }, 200);
+  });
 }
 
 function init() {
