@@ -824,6 +824,37 @@
     .popup-tone-btn:active {
       transform: translateY(0);
     }
+
+    /* Knowledge Base */
+    .popup-kb-conversation { max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
+    .popup-kb-message { margin-bottom: 8px; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.5; word-break: break-word; }
+    .popup-kb-user { background: linear-gradient(135deg, rgba(255,213,128,0.15), rgba(232,181,232,0.15)); border: 1px solid rgba(255,188,127,0.25); color: #2D1B4E; font-weight: 500; }
+    .popup-kb-assistant { background: #f9fafb; border: 1px solid #e5e7eb; color: #374151; }
+    .popup-kb-assistant p { margin-bottom: 6px; }
+    .popup-kb-assistant p:last-child { margin-bottom: 0; }
+    .popup-kb-assistant ul, .popup-kb-assistant ol { padding-left: 18px; margin: 6px 0; }
+    .popup-kb-assistant li { margin-bottom: 3px; }
+    .popup-kb-assistant code { background: rgba(232,181,232,0.15); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    .popup-kb-suggestions { display: flex; flex-direction: column; gap: 6px; }
+    .popup-kb-suggestion-btn { padding: 10px 14px; background: white; border: 1px solid rgba(232,181,232,0.3); border-radius: 10px; font-size: 13px; font-weight: 500; color: #2D1B4E; cursor: pointer; text-align: left; transition: all 0.2s ease; font-family: inherit; }
+    .popup-kb-suggestion-btn:hover { border-color: rgba(255,188,127,0.5); background: #fefefe; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(255,188,127,0.15); }
+    .popup-kb-input-section { padding-top: 6px; }
+    .popup-kb-input-row { display: flex; gap: 8px; align-items: stretch; }
+    .popup-kb-input { flex: 1; padding: 8px 12px !important; margin-bottom: 0 !important; }
+    .popup-kb-ask-btn { padding: 8px 16px; background: linear-gradient(135deg, #FFD580, #FFBC7F, #FFB0C0, #E8B5E8); color: white; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer; transition: all 0.2s ease; white-space: nowrap; }
+    .popup-kb-ask-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(255,188,127,0.3); }
+    .popup-kb-ask-btn:disabled { background: linear-gradient(135deg, #E5E7EB, #D1D5DB); cursor: not-allowed; transform: none; box-shadow: none; }
+    .popup-kb-typing { display: flex; gap: 4px; padding: 4px 0; }
+    .popup-kb-typing-dot { width: 6px; height: 6px; border-radius: 50%; background: #9B8FB8; animation: popupKbBounce 1.4s ease-in-out infinite; }
+    .popup-kb-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .popup-kb-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes popupKbBounce { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
+    .popup-kb-actions-row { margin-top: 6px; text-align: center; }
+    .popup-kb-new-btn { background: none; border: none; font-family: inherit; font-size: 11px; color: #9B8FB8; cursor: pointer; padding: 3px 6px; }
+    .popup-kb-new-btn:hover { color: #6B5B8C; }
+    .popup-kb-citations { margin-top: 8px; padding-top: 6px; border-top: 1px solid #e5e7eb; }
+    .popup-kb-citations-label { font-size: 10px; font-weight: 600; color: #9B8FB8; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 3px; }
+    .popup-kb-citation { font-size: 11px; color: #6B5B8C; padding: 1px 0; }
   </style>
 </head>
 <body>

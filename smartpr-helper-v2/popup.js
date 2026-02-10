@@ -12,6 +12,10 @@ let currentContext = null;
 let popupLoadingMessageTimer = null;
 let popupBusy = false; // Prevents double-clicks firing concurrent API calls
 
+// Knowledge Base state
+let popupKBConversation = [];
+let popupKBConversationId = null;
+
 // ========== Toggle & Settings ==========
 function renderExtensionToggle(disabled) {
   if (!extensionToggle || !extensionStatus) return;
@@ -1117,35 +1121,10 @@ async function replaceEditorText(value) {
 
 // ========== Overview Page ==========
 function renderOverview(onSmartPr) {
-  const ctaText = onSmartPr
-    ? 'Open a mailing to get started with these features.'
-    : 'Visit <strong>smart.pr</strong> and open a mailing to use these features.';
-
-  mainContent.innerHTML = `
-    <div class="section">
-      <p class="overview-intro">
-        AI-powered writing assistant for Smart.pr mailings.
-      </p>
-    </div>
-    <div class="section">
-      <span class="section-label">Features</span>
-      <div class="feature-card">
-        <div class="feature-icon">\u2709\uFE0F</div>
-        <div class="feature-title">Subject Line Helper</div>
-        <div class="feature-desc">Generate compelling subject lines or get feedback on your current one.</div>
-        <div class="feature-how">\u2192 Click the subject field in any mailing</div>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">\u2728</div>
-        <div class="feature-title">Paragraph Coach</div>
-        <div class="feature-desc">Fix grammar, rephrase text, translate, find synonyms, or shorten your content.</div>
-        <div class="feature-how">\u2192 Select text in the editor and click the icon</div>
-      </div>
-    </div>
-    <div class="cta-text">
-      <p>${ctaText}</p>
-    </div>
-  `;
+  // Overview leads with Knowledge Base as the primary action
+  popupKBConversation = [];
+  popupKBConversationId = null;
+  renderPopupKBEmpty();
 }
 
 // ========== Main Rendering ==========
@@ -1164,6 +1143,216 @@ function renderForContext(context) {
       renderOverview(context.onSmartPr || false);
       break;
   }
+}
+
+// ========== Knowledge Base ==========
+async function renderPopupKBEmpty() {
+  await setPopupContentWithTransition(`
+    <div class="section">
+      <div style="text-align: center; padding: 16px 0;">
+        <div style="font-size: 36px; margin-bottom: 8px;">📚</div>
+        <strong>Ask anything about Smart.pr</strong>
+        <p style="margin-top: 6px; color: #6b7280; font-size: 13px;">
+          Get help with the platform or PR writing best practices.
+        </p>
+      </div>
+    </div>
+    <div class="section">
+      <span class="section-label">Suggested Questions</span>
+      <div class="popup-kb-suggestions">
+        <button class="popup-kb-suggestion-btn cascade-item" style="animation-delay: 0ms" data-q="How do I schedule a mailing?">How do I schedule a mailing?</button>
+        <button class="popup-kb-suggestion-btn cascade-item" style="animation-delay: 60ms" data-q="What makes a good press release subject line?">What makes a good PR subject line?</button>
+        <button class="popup-kb-suggestion-btn cascade-item" style="animation-delay: 120ms" data-q="How do I import contacts?">How do I import contacts?</button>
+      </div>
+    </div>
+    <div class="section popup-kb-input-section">
+      <div class="popup-kb-input-row">
+        <input type="text" id="popup-kb-input" class="popup-textarea popup-kb-input" placeholder="Ask a question..." style="min-height: auto; resize: none;">
+        <button class="popup-kb-ask-btn" id="popup-kb-ask-btn">Ask</button>
+      </div>
+    </div>
+    <div class="section" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(232,181,232,0.15);">
+      <span class="section-label">Also available in mailings</span>
+      <div style="font-size: 11px; color: #9B8FB8; line-height: 1.7;">
+        <div>\u2709\uFE0F <strong>Subject Line Coach</strong> \u2014 click the subject field</div>
+        <div>\u2728 <strong>Paragraph Coach</strong> \u2014 select text in the editor</div>
+      </div>
+    </div>
+  `);
+
+  document.querySelectorAll('.popup-kb-suggestion-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handlePopupKBQuestion(btn.dataset.q);
+    });
+  });
+
+  const input = document.getElementById('popup-kb-input');
+  const askBtn = document.getElementById('popup-kb-ask-btn');
+
+  askBtn.addEventListener('click', () => {
+    const q = input.value.trim();
+    if (q) handlePopupKBQuestion(q);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (q) handlePopupKBQuestion(q);
+    }
+  });
+
+  input.focus();
+}
+
+async function handlePopupKBQuestion(question) {
+  if (popupBusy) return;
+  popupBusy = true;
+
+  popupKBConversation.push({ role: 'user', text: question });
+  renderPopupKBConversation(true);
+
+  try {
+    const result = await window.SmartPRAPI.askKnowledgeBase(question, popupKBConversationId);
+    popupKBConversationId = result.conversationId;
+
+    popupKBConversation.push({
+      role: 'assistant',
+      text: result.answer,
+      citations: result.citations || []
+    });
+
+    renderPopupKBConversation(false);
+  } catch (error) {
+    popupKBConversation.pop();
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    renderPopupKBConversation(false, errorMessage);
+  } finally {
+    popupBusy = false;
+  }
+}
+
+async function renderPopupKBConversation(isLoading, errorMessage) {
+  const messagesHTML = popupKBConversation.map((msg, i) => {
+    if (msg.role === 'user') {
+      return `
+        <div class="popup-kb-message popup-kb-user cascade-item" style="animation-delay: ${i * 40}ms">
+          ${escapeHTML(msg.text)}
+        </div>
+      `;
+    } else {
+      return `
+        <div class="popup-kb-message popup-kb-assistant cascade-item" style="animation-delay: ${i * 40}ms">
+          ${renderPopupKBMarkup(msg.text)}
+        </div>
+      `;
+    }
+  }).join('');
+
+  let loadingHTML = '';
+  if (isLoading) {
+    loadingHTML = `
+      <div class="popup-kb-message popup-kb-assistant">
+        <div class="popup-kb-typing">
+          <span class="popup-kb-typing-dot"></span>
+          <span class="popup-kb-typing-dot"></span>
+          <span class="popup-kb-typing-dot"></span>
+        </div>
+      </div>
+    `;
+  }
+
+  let errorHTML = '';
+  if (errorMessage) {
+    errorHTML = `<div class="error-message" style="margin-bottom: 8px;">${escapeHTML(errorMessage)}</div>`;
+  }
+
+  await setPopupContentWithTransition(`
+    <div class="popup-kb-conversation" id="popup-kb-conversation">
+      ${messagesHTML}
+      ${loadingHTML}
+      ${errorHTML}
+    </div>
+    <div class="section popup-kb-input-section">
+      <div class="popup-kb-input-row">
+        <input type="text" id="popup-kb-input" class="popup-textarea popup-kb-input" placeholder="Ask a follow-up..." style="min-height: auto; resize: none;" ${isLoading ? 'disabled' : ''}>
+        <button class="popup-kb-ask-btn" id="popup-kb-ask-btn" ${isLoading ? 'disabled' : ''}>Ask</button>
+      </div>
+      <div class="popup-kb-actions-row">
+        <button class="popup-kb-new-btn" id="popup-kb-new-btn">New conversation</button>
+      </div>
+    </div>
+  `);
+
+  const convoEl = document.getElementById('popup-kb-conversation');
+  if (convoEl) convoEl.scrollTop = convoEl.scrollHeight;
+
+  const input = document.getElementById('popup-kb-input');
+  const askBtn = document.getElementById('popup-kb-ask-btn');
+  const newBtn = document.getElementById('popup-kb-new-btn');
+
+  if (!isLoading) {
+    askBtn.addEventListener('click', () => {
+      const q = input.value.trim();
+      if (q) handlePopupKBQuestion(q);
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const q = input.value.trim();
+        if (q) handlePopupKBQuestion(q);
+      }
+    });
+
+    input.focus();
+  }
+
+  newBtn.addEventListener('click', () => {
+    popupKBConversation = [];
+    popupKBConversationId = null;
+    renderPopupKBEmpty();
+  });
+}
+
+function renderPopupKBMarkup(text) {
+  if (!text) return '';
+  const escaped = escapeHTML(text);
+  const lines = escaped.split(/\r?\n/);
+  const parts = [];
+  let inList = false;
+  let listType = null;
+
+  const closeList = () => {
+    if (!inList) return;
+    parts.push(listType === 'ul' ? '</ul>' : '</ol>');
+    inList = false;
+    listType = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { closeList(); continue; }
+    const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+    if (bulletMatch) {
+      if (!inList || listType !== 'ul') { closeList(); parts.push('<ul>'); inList = true; listType = 'ul'; }
+      parts.push(`<li>${bulletMatch[1]}</li>`);
+      continue;
+    }
+    if (orderedMatch) {
+      if (!inList || listType !== 'ol') { closeList(); parts.push('<ol>'); inList = true; listType = 'ol'; }
+      parts.push(`<li>${orderedMatch[1]}</li>`);
+      continue;
+    }
+    closeList();
+    parts.push(`<p>${trimmed}</p>`);
+  }
+
+  closeList();
+  return parts.join('')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
 }
 
 // ========== Cleanup on popup close ==========

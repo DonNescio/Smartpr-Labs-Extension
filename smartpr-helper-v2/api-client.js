@@ -35,7 +35,7 @@ const ERROR_MESSAGES = {
  * @param {object} payload - Request payload
  * @returns {Promise<object>} - API response
  */
-async function callProxyAPI(endpoint, payload) {
+async function callProxyAPI(endpoint, payload, options = {}) {
   try {
     // Get user email from storage
     const email = await storage.get('smartpr_user_email');
@@ -49,7 +49,7 @@ async function callProxyAPI(endpoint, payload) {
 
     // Make API request with 30s timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const timeoutId = setTimeout(() => controller.abort(), options.timeout || 30000);
 
     let response;
     try {
@@ -330,12 +330,44 @@ async function submitFeedback(feedback) {
   }
 }
 
+/**
+ * Ask a question to the Knowledge Base
+ * @param {string} question - The user's question
+ * @param {string|null} conversationId - OpenAI conversation ID for follow-ups
+ * @returns {Promise<object>} - { answer, conversationId, citations }
+ */
+async function askKnowledgeBase(question, conversationId = null) {
+  try {
+    const payload = { question };
+    if (conversationId) payload.conversation_id = conversationId;
+    const response = await callProxyAPI('/ask-kb', payload, { timeout: 45000 });
+
+    if (!response.success || !response.answer) {
+      throw {
+        code: 'INVALID_RESPONSE',
+        message: 'Invalid response from server'
+      };
+    }
+
+    return {
+      answer: response.answer,
+      conversationId: response.conversation_id || null,
+      citations: response.citations || []
+    };
+
+  } catch (error) {
+    console.error('[API Client] Knowledge base error:', error);
+    throw error;
+  }
+}
+
 // Export for use in other scripts
 window.SmartPRAPI = {
   generateSubjectLines,
   getSubjectFeedback,
   processParagraph,
   submitFeedback,
+  askKnowledgeBase,
   validateUser,
   getErrorMessage,
   isValidEmail,

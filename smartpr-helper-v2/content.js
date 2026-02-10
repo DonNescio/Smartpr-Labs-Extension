@@ -41,7 +41,7 @@ let currentSelection = null;
 let selectedText = '';
 let selectedEditor = null;
 let selectedEditorDoc = null; // The document the editor lives in (for iframe support)
-let currentSidebarMode = 'subject'; // 'subject' or 'paragraph'
+let currentSidebarMode = 'subject'; // 'subject', 'paragraph', or 'kb'
 let editorObserver = null;
 let scanThrottleTimer = null;
 let selectionUpdateTimer = null;
@@ -52,6 +52,11 @@ let paragraphIconDocs = new Set();
 // Undo state for text replacement
 let undoState = null; // { editor, editorDoc, originalText, selection, isInput }
 let undoToastTimer = null;
+
+// Knowledge Base state
+let kbConversation = [];        // [{ role: 'user'|'assistant', text, citations? }]
+let kbConversationId = null;    // OpenAI conversation ID for follow-ups
+let kbBusy = false;
 
 // Progressive loading message timer
 let loadingMessageTimer = null;
@@ -1195,40 +1200,8 @@ function openSidebarFromIcon() {
 
 function openOverviewSidebar() {
   if (extensionDisabled) return;
-  if (!sidebar) {
-    createSidebar();
-  }
-
-  const title = sidebar.querySelector('.sph-title');
-  if (title) {
-    title.textContent = 'Smart.pr Helper';
-  }
-
-  sidebar.classList.add('open');
-  updateFloatingIcon(true);
-  hideIconBadge();
-
-  const content = $('#sph-content');
-  content.innerHTML = `
-    <div class="sph-section">
-      <p style="font-size: 14px; color: #374151; line-height: 1.6; margin: 0;">
-        AI-powered writing assistant for Smart.pr mailings.
-      </p>
-    </div>
-    <div class="sph-section">
-      <span class="sph-label">Features</span>
-      <div style="font-size: 14px; color: #374151; line-height: 1.8;">
-        <div style="margin-bottom: 4px;">✉️ <strong>Subject Line Coach</strong></div>
-        <div style="margin-bottom: 12px; font-size: 13px; color: #6b7280; padding-left: 26px;">Click the subject field in any mailing</div>
-        <div style="margin-bottom: 4px;">✨ <strong>Paragraph Coach</strong></div>
-        <div style="font-size: 13px; color: #6b7280; padding-left: 26px;">Select text in the editor and click the ✨ icon</div>
-      </div>
-    </div>
-    <div class="sph-empty" style="margin-top: 8px;">
-      <div class="sph-empty-icon">👈</div>
-      <div class="sph-empty-text">Open a mailing to get started</div>
-    </div>
-  `;
+  // Overview goes straight into KB mode
+  openKnowledgeBaseSidebar();
 }
 
 function closeSidebar() {
@@ -1311,6 +1284,261 @@ function openEditorContextSidebar() {
 
   // Watch for text selection while sidebar is open
   startEditorSelectionWatcher();
+}
+
+// ========== Knowledge Base Sidebar ==========
+function openKnowledgeBaseSidebar() {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  currentSidebarMode = 'kb';
+
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = 'Knowledge Base';
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  // Reset conversation state for fresh session
+  kbConversation = [];
+  kbConversationId = null;
+
+  showKBEmptyState();
+}
+
+async function showKBEmptyState() {
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <div class="sph-empty" style="padding: 24px;">
+        <div class="sph-empty-icon" style="font-size: 48px;">📚</div>
+        <div class="sph-empty-text">
+          <strong>Ask anything about Smart.pr</strong>
+          <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
+            Get help with the platform or PR writing best practices.
+          </p>
+        </div>
+      </div>
+    </div>
+    <div class="sph-section sph-kb-input-section">
+      <div class="sph-kb-input-row">
+        <input type="text" id="kb-question-input" class="sph-input sph-kb-input" placeholder="Ask a question...">
+        <button class="sph-kb-ask-btn" id="kb-ask-btn">Ask</button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Suggested Questions</span>
+      <div class="sph-kb-suggestions">
+        <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 0ms" data-q="How do I schedule a mailing?">How do I schedule a mailing?</button>
+        <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 60ms" data-q="What makes a good press release subject line?">What makes a good PR subject line?</button>
+        <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 120ms" data-q="How do I import contacts?">How do I import contacts?</button>
+      </div>
+    </div>
+    <div class="sph-section" style="margin-top: 8px; padding-top: 12px; border-top: 1px solid rgba(232, 181, 232, 0.15);">
+      <span class="sph-label">Also available in mailings</span>
+      <div style="font-size: 12px; color: var(--text-muted); line-height: 1.7;">
+        <div>✉️ <strong>Subject Line Coach</strong> — click the subject field</div>
+        <div>✨ <strong>Paragraph Coach</strong> — select text in the editor</div>
+      </div>
+    </div>
+  `);
+
+  $$('.sph-kb-suggestion-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handleKBQuestion(btn.dataset.q);
+    });
+  });
+
+  const input = $('#kb-question-input');
+  const askBtn = $('#kb-ask-btn');
+
+  askBtn.addEventListener('click', () => {
+    const q = input.value.trim();
+    if (q) handleKBQuestion(q);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (q) handleKBQuestion(q);
+    }
+  });
+
+  input.focus();
+}
+
+async function handleKBQuestion(question) {
+  if (kbBusy) return;
+  kbBusy = true;
+
+  // Add user message to conversation
+  kbConversation.push({ role: 'user', text: question });
+
+  // Show loading state with conversation history
+  showKBConversation(true);
+
+  try {
+    const result = await window.SmartPRAPI.askKnowledgeBase(question, kbConversationId);
+
+    // Store conversation_id for follow-ups
+    kbConversationId = result.conversationId;
+
+    // Add assistant response to conversation
+    kbConversation.push({
+      role: 'assistant',
+      text: result.answer,
+      citations: result.citations || []
+    });
+
+    showKBConversation(false);
+
+  } catch (error) {
+    // Remove the user message that failed
+    kbConversation.pop();
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showKBConversation(false, errorMessage);
+  } finally {
+    kbBusy = false;
+  }
+}
+
+async function showKBConversation(isLoading, errorMessage) {
+  const messagesHTML = kbConversation.map((msg, i) => {
+    if (msg.role === 'user') {
+      return `
+        <div class="sph-kb-message sph-kb-user sph-cascade-item" style="animation-delay: ${i * 40}ms">
+          <div class="sph-kb-message-text">${escapeHTML(msg.text)}</div>
+        </div>
+      `;
+    } else {
+      return `
+        <div class="sph-kb-message sph-kb-assistant sph-cascade-item" style="animation-delay: ${i * 40}ms">
+          <div class="sph-kb-message-text">${renderKBMarkup(msg.text)}</div>
+        </div>
+      `;
+    }
+  }).join('');
+
+  let loadingHTML = '';
+  if (isLoading) {
+    loadingHTML = `
+      <div class="sph-kb-message sph-kb-assistant">
+        <div class="sph-kb-typing">
+          <span class="sph-kb-typing-dot"></span>
+          <span class="sph-kb-typing-dot"></span>
+          <span class="sph-kb-typing-dot"></span>
+        </div>
+      </div>
+    `;
+  }
+
+  let errorHTML = '';
+  if (errorMessage) {
+    errorHTML = `
+      <div class="sph-error" style="margin-bottom: 12px;">
+        <div class="sph-error-text">${escapeHTML(errorMessage)}</div>
+      </div>
+    `;
+  }
+
+  await setContentWithTransition(`
+    <div class="sph-kb-conversation" id="kb-conversation">
+      ${messagesHTML}
+      ${loadingHTML}
+      ${errorHTML}
+    </div>
+    <div class="sph-section sph-kb-input-section">
+      <div class="sph-kb-input-row">
+        <input type="text" id="kb-question-input" class="sph-input sph-kb-input" placeholder="Ask a follow-up..." ${isLoading ? 'disabled' : ''}>
+        <button class="sph-kb-ask-btn" id="kb-ask-btn" ${isLoading ? 'disabled' : ''}>Ask</button>
+      </div>
+      <div class="sph-kb-actions-row">
+        <button class="sph-kb-new-btn" id="kb-new-btn">New conversation</button>
+      </div>
+    </div>
+  `);
+
+  // Scroll conversation to bottom
+  const convoEl = $('#kb-conversation');
+  if (convoEl) {
+    convoEl.scrollTop = convoEl.scrollHeight;
+  }
+
+  const input = $('#kb-question-input');
+  const askBtn = $('#kb-ask-btn');
+  const newBtn = $('#kb-new-btn');
+
+  if (!isLoading) {
+    askBtn.addEventListener('click', () => {
+      const q = input.value.trim();
+      if (q) handleKBQuestion(q);
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const q = input.value.trim();
+        if (q) handleKBQuestion(q);
+      }
+    });
+
+    input.focus();
+  }
+
+  newBtn.addEventListener('click', () => {
+    kbConversation = [];
+    kbConversationId = null;
+    showKBEmptyState();
+  });
+}
+
+function renderKBMarkup(text) {
+  if (!text) return '';
+  const escaped = escapeHTML(text);
+  const lines = escaped.split(/\r?\n/);
+  const parts = [];
+  let inList = false;
+  let listType = null;
+
+  const closeList = () => {
+    if (!inList) return;
+    parts.push(listType === 'ul' ? '</ul>' : '</ol>');
+    inList = false;
+    listType = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+    const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+    if (bulletMatch) {
+      if (!inList || listType !== 'ul') { closeList(); parts.push('<ul>'); inList = true; listType = 'ul'; }
+      parts.push(`<li>${bulletMatch[1]}</li>`);
+      continue;
+    }
+    if (orderedMatch) {
+      if (!inList || listType !== 'ol') { closeList(); parts.push('<ol>'); inList = true; listType = 'ol'; }
+      parts.push(`<li>${orderedMatch[1]}</li>`);
+      continue;
+    }
+    closeList();
+    parts.push(`<p>${trimmed}</p>`);
+  }
+
+  closeList();
+
+  return parts.join('')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
 }
 
 function startEditorSelectionWatcher() {
@@ -2502,6 +2730,12 @@ const PROGRESSIVE_MESSAGES = {
     'Trimming the excess...',
     'Keeping what matters...',
     'Nearly done...'
+  ],
+  kb: [
+    'Searching knowledge base...',
+    'Reading the docs...',
+    'Putting together an answer...',
+    'Almost there...'
   ],
   default: [
     'Processing...',
