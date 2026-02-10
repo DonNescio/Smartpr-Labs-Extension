@@ -173,12 +173,13 @@
   right: -400px;
   width: 400px;
   height: 100vh;
-  background: linear-gradient(180deg,
-    #FFFBF7 0%,
-    #FFF8F5 30%,
-    #FFF5F8 60%,
-    #FAF5FF 100%
+  background: linear-gradient(135deg,
+    #FFFBF7 0%, #FFF8F5 15%, #FFF5F8 30%, #FAF5FF 45%,
+    #FFFBF7 55%, #FFF8F5 70%, #FFF5F8 85%, #FAF5FF 100%
   );
+  background-size: 400% 400%;
+  animation: gradientShift 20s ease infinite;
+  animation-play-state: paused;
   backdrop-filter: blur(20px);
   box-shadow: -4px 0 32px rgba(212, 165, 245, 0.2);
   z-index: 2147483647;
@@ -190,6 +191,7 @@
 
 #smartpr-helper-sidebar.open {
   right: 0;
+  animation-play-state: running;
 }
 
 /* Sidebar Header */
@@ -219,11 +221,14 @@
 .sph-close {
   background: rgba(255, 255, 255, 0.6);
   border: 2px solid rgba(232, 181, 232, 0.3);
-  font-size: 24px;
   color: var(--text-secondary);
   cursor: pointer;
-  padding: 6px 10px;
-  line-height: 1;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 12px;
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   backdrop-filter: blur(10px);
@@ -415,6 +420,39 @@
   font-weight: 500;
 }
 
+.sph-suggestion-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sph-use-button {
+  background: var(--gradient-warm);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 2px 8px rgba(255, 188, 127, 0.3);
+}
+
+.sph-use-button:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(255, 188, 127, 0.4);
+}
+
+.sph-use-button:active {
+  transform: scale(0.98);
+}
+
+.sph-use-button.copied {
+  background: linear-gradient(135deg, #86EFAC 0%, #34D399 100%);
+}
+
 .sph-copy-button {
   background: var(--gradient-cool);
   color: white;
@@ -426,7 +464,6 @@
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  flex-shrink: 0;
   box-shadow: 0 2px 8px rgba(212, 165, 245, 0.3);
 }
 
@@ -871,7 +908,7 @@
   color: var(--text-primary);
   line-height: 1.7;
   border: 2px solid rgba(52, 211, 153, 0.3);
-  font-weight: 500;
+  font-weight: normal;
   white-space: pre-wrap;
 }
 
@@ -915,6 +952,12 @@
   backdrop-filter: blur(10px);
 }
 
+.sph-synonym-option.sph-rephrase-option {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
 .sph-synonym-option:hover {
   border-color: rgba(255, 188, 127, 0.5);
   background: rgba(255, 255, 255, 0.95);
@@ -923,7 +966,7 @@
 
 .sph-synonym-text {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: normal;
   color: var(--text-primary);
   flex: 1;
   line-height: 1.4;
@@ -936,6 +979,10 @@
   gap: 6px;
   margin-left: 10px;
   flex-shrink: 0;
+}
+
+.sph-rephrase-option .sph-synonym-actions {
+  margin-left: 0;
 }
 
 .sph-synonym-btn {
@@ -1014,6 +1061,7 @@
   padding: 12px 24px;
   border-top: 1px solid rgba(232, 181, 232, 0.2);
   flex-shrink: 0;
+  text-align: center;
 }
 
 .sph-feedback-link {
@@ -1108,3 +1156,164 @@
 .sph-feedback-cancel:hover {
   color: var(--text-secondary);
 }
+
+/* ========== Magic UX Enhancements ========== */
+
+/* #3 Animated Background Gradient */
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* #12 View Transitions */
+@keyframes viewFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.sph-view-enter {
+  animation: viewFadeIn 0.2s ease-out both;
+}
+
+/* #1 Cascade Animations */
+@keyframes cascadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.sph-cascade-item {
+  animation: cascadeIn 0.3s ease-out both;
+}
+
+/* #2 Skeleton Loading */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.sph-skeleton {
+  background: linear-gradient(90deg,
+    rgba(232, 181, 232, 0.1) 25%,
+    rgba(232, 181, 232, 0.25) 50%,
+    rgba(232, 181, 232, 0.1) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 12px;
+}
+
+.sph-skeleton-card {
+  height: 48px;
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+
+.sph-skeleton-text {
+  height: 80px;
+  border-radius: 14px;
+}
+
+.sph-skeleton-label {
+  height: 12px;
+  width: 120px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+/* #4 Sparkle Burst */
+@keyframes sparkleBurst {
+  0% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(var(--sx), var(--sy)) scale(0); opacity: 0; }
+}
+
+.sph-sparkle {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 999;
+  animation: sparkleBurst 0.5s ease-out forwards;
+}
+
+/* #6 Grammar Diff Highlight */
+.sph-diff-highlight {
+  background: rgba(255, 188, 127, 0.3);
+  border-radius: 3px;
+  padding: 1px 3px;
+  font-weight: 600;
+}
+
+/* #11 Typewriter Cursor */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.sph-typing-cursor {
+  display: inline;
+  color: var(--text-muted);
+  animation: blink 0.8s step-end infinite;
+  font-weight: 300;
+}
+
+/* Undo Toast */
+.sph-undo-toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sph-undo-btn {
+  background: rgba(255, 255, 255, 0.3);
+  color: white;
+  border: 1.5px solid rgba(255, 255, 255, 0.5);
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.sph-undo-btn:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+/* Tone Selector */
+.sph-tone-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sph-tone-btn {
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 2px solid rgba(232, 181, 232, 0.3);
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  backdrop-filter: blur(10px);
+  text-align: center;
+}
+
+.sph-tone-btn:hover {
+  background: var(--gradient-warm);
+  border-color: transparent;
+  color: white;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(255, 188, 127, 0.3);
+}
+
+.sph-tone-btn:active {
+  transform: translateY(0);
+}
+

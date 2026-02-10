@@ -49,6 +49,13 @@ let subjectFieldUpdateTimer = null;
 let iconVisibilityTimer = null;
 let paragraphIconDocs = new Set();
 
+// Undo state for text replacement
+let undoState = null; // { editor, editorDoc, originalText, selection, isInput }
+let undoToastTimer = null;
+
+// Progressive loading message timer
+let loadingMessageTimer = null;
+
 // Floating icon overlay state (keeps icons outside React's DOM tree)
 let iconOverlayContainer = null;
 let elementToIconMap = new WeakMap(); // Maps editor elements to their icon elements
@@ -64,6 +71,7 @@ let dialogObserver = null;
 
 // Pro editor (BeePlugin/TinyMCE) state
 let proEditorObserver = null;
+let proStageObserver = null;
 
 function findTipTapEditors(doc = document) {
   // Find all TipTap editor elements (ProseMirror-based)
@@ -462,11 +470,12 @@ function injectStylesIntoIframe(iframeDoc) {
   `;
   iframeDoc.head.appendChild(style);
 
-  // Add scroll listener to update icon positions
+  // Add scroll listener to update icon positions (guard against duplicates)
   const iframeWin = iframeDoc.defaultView;
-  if (iframeWin) {
+  if (iframeWin && !iframeWin._sphListenersAttached) {
     iframeWin.addEventListener('scroll', updateAllIconPositions, { passive: true });
     iframeWin.addEventListener('resize', updateAllIconPositions, { passive: true });
+    iframeWin._sphListenersAttached = true;
   }
 }
 
@@ -638,6 +647,12 @@ function initDialogWatcher() {
 
 // Reset editor-related state when editor dialog closes
 function resetDetectionState() {
+  // Clear any pending scan throttle so it doesn't fire on stale DOM
+  if (scanThrottleTimer) {
+    clearTimeout(scanThrottleTimer);
+    scanThrottleTimer = null;
+  }
+
   // Clean up editor iframe watching (classic editor)
   if (editorIframeObserver) {
     editorIframeObserver.disconnect();
@@ -646,6 +661,10 @@ function resetDetectionState() {
   editorIframe = null;
 
   // Clean up pro editor watching
+  if (proStageObserver) {
+    proStageObserver.disconnect();
+    proStageObserver = null;
+  }
   if (proEditorObserver) {
     proEditorObserver.disconnect();
     proEditorObserver = null;
@@ -696,15 +715,19 @@ function initProEditor() {
   }
 
   // Wait for #sdk-stage to appear
-  const stageObserver = new MutationObserver(() => {
+  if (proStageObserver) {
+    proStageObserver.disconnect();
+  }
+  proStageObserver = new MutationObserver(() => {
     const stage = document.querySelector('#sdk-stage');
     if (stage) {
-      stageObserver.disconnect();
+      proStageObserver.disconnect();
+      proStageObserver = null;
       watchProEditorStage(stage);
     }
   });
 
-  stageObserver.observe(document.body || document.documentElement, {
+  proStageObserver.observe(document.body || document.documentElement, {
     childList: true,
     subtree: true
   });
@@ -854,9 +877,9 @@ function handleSubjectFocus() {
 
   // Show appropriate nudge based on whether field is empty
   if (currentValue === '') {
-    showNudge('Need help writing a subject line?', 'empty');
+    showNudge(getNudgeMessage('empty'), 'empty');
   } else {
-    showNudge('Want feedback on your subject line?', 'filled');
+    showNudge(getNudgeMessage('filled'), 'filled');
   }
 }
 
@@ -989,7 +1012,7 @@ function createSidebar() {
   sidebar.innerHTML = `
     <div class="sph-header">
       <h2 class="sph-title">Subject Line Helper</h2>
-      <button class="sph-close">\u00d7</button>
+      <button class="sph-close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="13" y2="13"/><line x1="13" y1="1" x2="1" y2="13"/></svg></button>
     </div>
     <div class="sph-content" id="sph-content">
       <!-- Content will be dynamically inserted -->
@@ -1048,6 +1071,7 @@ function showSidebarFeedbackForm(footer) {
 
     try {
       await window.SmartPRAPI.submitFeedback(text);
+      triggerSparkle(sendBtn);
       showToast('\u2713 Feedback sent!');
       resetSidebarFeedback(footer);
     } catch (error) {
@@ -1153,14 +1177,58 @@ function openSidebarFromIcon() {
     }
   }
 
-  // Fallback to subject line mode
-  const currentValue = subjectField ? subjectField.value.trim() : '';
-
-  if (currentValue === '') {
-    openSidebar('empty');
+  // Check if subject field is actually present and connected in the DOM
+  const activeSubjectField = subjectField && subjectField.isConnected ? subjectField : findSubjectField();
+  if (activeSubjectField) {
+    subjectField = activeSubjectField;
+    const currentValue = subjectField.value.trim();
+    if (currentValue === '') {
+      openSidebar('empty');
+    } else {
+      openSidebar('filled');
+    }
   } else {
-    openSidebar('filled');
+    // No editor and no subject field in the DOM — show feature overview
+    openOverviewSidebar();
   }
+}
+
+function openOverviewSidebar() {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = 'Smart.pr Helper';
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  const content = $('#sph-content');
+  content.innerHTML = `
+    <div class="sph-section">
+      <p style="font-size: 14px; color: #374151; line-height: 1.6; margin: 0;">
+        AI-powered writing assistant for Smart.pr mailings.
+      </p>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Features</span>
+      <div style="font-size: 14px; color: #374151; line-height: 1.8;">
+        <div style="margin-bottom: 4px;">✉️ <strong>Subject Line Coach</strong></div>
+        <div style="margin-bottom: 12px; font-size: 13px; color: #6b7280; padding-left: 26px;">Click the subject field in any mailing</div>
+        <div style="margin-bottom: 4px;">✨ <strong>Paragraph Coach</strong></div>
+        <div style="font-size: 13px; color: #6b7280; padding-left: 26px;">Select text in the editor and click the ✨ icon</div>
+      </div>
+    </div>
+    <div class="sph-empty" style="margin-top: 8px;">
+      <div class="sph-empty-icon">👈</div>
+      <div class="sph-empty-text">Open a mailing to get started</div>
+    </div>
+  `;
 }
 
 function closeSidebar() {
@@ -1225,7 +1293,7 @@ function openEditorContextSidebar() {
       <div class="sph-empty-text">
         <strong>Select text to improve</strong>
         <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
-          Highlight text in any heading or paragraph block, then click the ✨ icon that appears to get AI-powered suggestions.
+          Highlight text in any heading or paragraph block to get AI-powered suggestions.
         </p>
       </div>
     </div>
@@ -1240,6 +1308,68 @@ function openEditorContextSidebar() {
       </div>
     </div>
   `;
+
+  // Watch for text selection while sidebar is open
+  startEditorSelectionWatcher();
+}
+
+function startEditorSelectionWatcher() {
+  stopSelectionTracking(); // Clear any existing
+
+  try {
+    const iframeDoc = editorIframe?.contentDocument || editorIframe?.contentWindow?.document;
+    const iframeWin = editorIframe?.contentWindow;
+    if (!iframeDoc || !iframeWin) return;
+
+    const handleSelection = () => {
+      if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+      selectionUpdateTimer = setTimeout(() => {
+        if (currentSidebarMode !== 'paragraph') return;
+        const selection = iframeWin.getSelection();
+        if (!selection || selection.isCollapsed || !selection.toString().trim()) return;
+
+        const anchorNode = selection.anchorNode;
+        const anchorElement = anchorNode && anchorNode.nodeType === 1
+          ? anchorNode : anchorNode?.parentElement;
+        const editor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
+        if (!editor) return;
+
+        selectedText = selection.toString().trim();
+        selectedEditor = editor;
+        selectedEditorDoc = iframeDoc;
+        currentSelection = selection.getRangeAt(0).cloneRange();
+        showParagraphCoachContent();
+        startSelectionTracking();
+      }, 200);
+    };
+
+    iframeDoc.addEventListener('selectionchange', handleSelection);
+    iframeDoc._sphSelectionHandler = handleSelection;
+
+    // Also watch heading inputs — they don't fire selectionchange
+    const headingInputs = findHeadingInputs(iframeDoc);
+    const headingHandler = (e) => {
+      const input = e.target;
+      if (!input.value?.trim()) return;
+      if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+      selectionUpdateTimer = setTimeout(() => {
+        if (currentSidebarMode !== 'paragraph') return;
+        selectedText = input.value.trim();
+        selectedEditor = input;
+        selectedEditorDoc = iframeDoc;
+        currentSelection = null;
+        showParagraphCoachContent();
+        startSelectionTracking();
+      }, 200);
+    };
+    headingInputs.forEach(input => {
+      input.addEventListener('focus', headingHandler);
+    });
+    iframeDoc._sphHeadingInputs = headingInputs;
+    iframeDoc._sphHeadingHandler = headingHandler;
+  } catch (e) {
+    console.warn('[Smart.pr Helper] Could not set up editor selection watcher:', e);
+  }
 }
 
 function startSelectionTracking() {
@@ -1257,11 +1387,31 @@ function startSelectionTracking() {
     }, 150);
   };
 
-  // Listen for selection changes
+  // Listen for selection changes (covers TipTap/contenteditable blocks)
   editorDoc.addEventListener('selectionchange', handleSelectionChange);
-
-  // Store cleanup function
   editorDoc._sphSelectionHandler = handleSelectionChange;
+
+  // Also watch heading inputs — they don't fire selectionchange on the document
+  const headingInputs = findHeadingInputs(editorDoc);
+  const headingHandler = (e) => {
+    const input = e.target;
+    if (input !== selectedEditor) {
+      selectedEditor = input;
+      selectedEditorDoc = editorDoc;
+    }
+    if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = setTimeout(() => {
+      updateSelectedTextFromEditor();
+    }, 150);
+  };
+
+  headingInputs.forEach(input => {
+    input.addEventListener('focus', headingHandler);
+    input.addEventListener('select', headingHandler);
+    input.addEventListener('keyup', headingHandler);
+  });
+  editorDoc._sphHeadingInputs = headingInputs;
+  editorDoc._sphHeadingHandler = headingHandler;
 }
 
 function stopSelectionTracking() {
@@ -1270,10 +1420,21 @@ function stopSelectionTracking() {
     selectionUpdateTimer = null;
   }
 
-  // Clean up listener from stored editor doc
+  // Clean up selectionchange listener
   if (selectedEditorDoc && selectedEditorDoc._sphSelectionHandler) {
     selectedEditorDoc.removeEventListener('selectionchange', selectedEditorDoc._sphSelectionHandler);
     delete selectedEditorDoc._sphSelectionHandler;
+  }
+
+  // Clean up heading input listeners
+  if (selectedEditorDoc && selectedEditorDoc._sphHeadingInputs && selectedEditorDoc._sphHeadingHandler) {
+    selectedEditorDoc._sphHeadingInputs.forEach(input => {
+      input.removeEventListener('focus', selectedEditorDoc._sphHeadingHandler);
+      input.removeEventListener('select', selectedEditorDoc._sphHeadingHandler);
+      input.removeEventListener('keyup', selectedEditorDoc._sphHeadingHandler);
+    });
+    delete selectedEditorDoc._sphHeadingInputs;
+    delete selectedEditorDoc._sphHeadingHandler;
   }
 }
 
@@ -1286,8 +1447,14 @@ function updateSelectedTextFromEditor() {
   let newText = '';
 
   if (isInputElement) {
-    // For heading inputs, just get the current value
-    newText = selectedEditor.value?.trim() || '';
+    // For heading inputs, use selected portion if any, otherwise full value
+    const selStart = selectedEditor.selectionStart;
+    const selEnd = selectedEditor.selectionEnd;
+    if (selStart !== selEnd) {
+      newText = selectedEditor.value.substring(selStart, selEnd).trim();
+    } else {
+      newText = selectedEditor.value?.trim() || '';
+    }
     currentSelection = null;
   } else {
     // For TipTap editors, check for selection
@@ -1397,9 +1564,8 @@ function updateSubjectFieldDisplay() {
   }
 }
 
-function showParagraphCoachContent() {
+async function showParagraphCoachContent() {
   if (extensionDisabled) return;
-  const content = $('#sph-content');
 
   // V2: Get block type from the editor's .block-wrapper container
   const container = selectedEditor ? selectedEditor.closest('.block-wrapper') : null;
@@ -1411,7 +1577,7 @@ function showParagraphCoachContent() {
     ? selectedText.substring(0, 200) + '...'
     : selectedText;
 
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Selected ${typeLabel}</span>
       <div class="sph-current-subject">${escapeHTML(displayText)}</div>
@@ -1441,24 +1607,68 @@ function showParagraphCoachContent() {
         </button>
       </div>
     </div>
-  `;
+  `);
 
   // Attach event listeners
   $('#action-grammar').addEventListener('click', () => handleParagraphAction('grammar'));
-  $('#action-rephrase').addEventListener('click', () => handleParagraphAction('rephrase'));
+  $('#action-rephrase').addEventListener('click', () => showToneSelector());
   $('#action-synonyms').addEventListener('click', () => handleParagraphAction('synonyms'));
   $('#action-translate').addEventListener('click', () => showTranslateOptions());
   $('#action-shorter').addEventListener('click', () => handleParagraphAction('shorter'));
 }
 
-function showTranslateOptions() {
-  const content = $('#sph-content');
-
+async function showToneSelector() {
   const displayText = selectedText.length > 150
     ? selectedText.substring(0, 150) + '...'
     : selectedText;
 
-  content.innerHTML = `
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">Selected Text</span>
+      <div class="sph-current-subject">${escapeHTML(displayText)}</div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button" id="rephrase-no-tone-btn">
+        Rephrase
+      </button>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">Or pick a tone</span>
+      <div class="sph-tone-buttons">
+        <button class="sph-tone-btn" data-tone="formal">Formal</button>
+        <button class="sph-tone-btn" data-tone="friendly">Friendly</button>
+        <button class="sph-tone-btn" data-tone="persuasive">Persuasive</button>
+        <button class="sph-tone-btn" data-tone="concise">Concise</button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button sph-button-secondary" id="back-to-actions-btn">
+        ← Back
+      </button>
+    </div>
+  `);
+
+  $('#rephrase-no-tone-btn').addEventListener('click', () => {
+    handleParagraphAction('rephrase');
+  });
+
+  $$('.sph-tone-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handleParagraphAction('rephrase', { tone: btn.dataset.tone });
+    });
+  });
+
+  $('#back-to-actions-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+async function showTranslateOptions() {
+  const displayText = selectedText.length > 150
+    ? selectedText.substring(0, 150) + '...'
+    : selectedText;
+
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Selected Text</span>
       <div class="sph-current-subject">${escapeHTML(displayText)}</div>
@@ -1481,7 +1691,7 @@ function showTranslateOptions() {
         ← Back
       </button>
     </div>
-  `;
+  `);
 
   // Language button handlers
   $$('.sph-lang-btn').forEach(btn => {
@@ -1545,9 +1755,15 @@ async function handleParagraphAction(action, options = {}) {
         break;
     }
 
-    showLoadingState(loadingMessage);
+    showLoadingState(loadingMessage, action);
 
     const result = await window.SmartPRAPI.processParagraph(text, action, options);
+
+    // Stop progressive loading messages
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
 
     if (action === 'synonyms') {
       showSynonymResult(result);
@@ -1563,15 +1779,17 @@ async function handleParagraphAction(action, options = {}) {
     showToast('✨ Done!');
 
   } catch (error) {
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
     console.error('[Smart.pr Helper] Paragraph action error:', error);
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     showParagraphError(errorMessage, action, options);
   }
 }
 
-function showParagraphResult(resultText, action, options = {}) {
-  const content = $('#sph-content');
-
+async function showParagraphResult(resultText, action, options = {}) {
   let actionLabel = 'Result';
   switch (action) {
     case 'grammar':
@@ -1595,42 +1813,52 @@ function showParagraphResult(resultText, action, options = {}) {
     ? selectedText.substring(0, 100) + '...'
     : selectedText;
 
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Original</span>
       <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
     </div>
     <div class="sph-section">
       <span class="sph-label">${escapeHTML(actionLabel)}</span>
-      <div class="sph-result-text">${escapeHTML(resultText)}</div>
+      <div class="sph-result-text" id="paragraph-result-text"></div>
     </div>
     <div class="sph-section sph-result-actions">
-      <button class="sph-button" id="replace-text-btn">
+      <button class="sph-button" id="replace-text-btn" disabled>
         Replace in Editor
       </button>
-      <button class="sph-button sph-button-secondary" id="copy-result-btn">
+      <button class="sph-button sph-button-secondary" id="copy-result-btn" disabled>
         Copy to Clipboard
       </button>
       <button class="sph-button sph-button-secondary" id="try-another-btn">
         ← Try Another Action
       </button>
     </div>
-  `;
+  `);
+
+  // Typewriter effect
+  const resultEl = $('#paragraph-result-text');
+  const replaceBtn = $('#replace-text-btn');
+  const copyBtn = $('#copy-result-btn');
+
+  typewriterEffect(resultEl, resultText).then(() => {
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
+  });
 
   // Replace button
-  $('#replace-text-btn').addEventListener('click', () => {
+  replaceBtn.addEventListener('click', () => {
     replaceTextInEditor(resultText);
   });
 
   // Copy button
-  $('#copy-result-btn').addEventListener('click', async () => {
+  copyBtn.addEventListener('click', async () => {
     await copyToClipboard(resultText);
-    const btn = $('#copy-result-btn');
-    btn.textContent = '✓ Copied';
-    btn.classList.add('copied');
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = '✓ Copied';
+    copyBtn.classList.add('copied');
     setTimeout(() => {
-      btn.textContent = 'Copy';
-      btn.classList.remove('copied');
+      copyBtn.textContent = 'Copy';
+      copyBtn.classList.remove('copied');
     }, 2000);
   });
 
@@ -1679,7 +1907,7 @@ function parseSynonymsFromText(text) {
   return suggestions;
 }
 
-function showSynonymResult(result) {
+async function showSynonymResult(result) {
   const content = $('#sph-content');
 
   // Prefer structured synonyms array from API, fall back to text parsing
@@ -1690,7 +1918,7 @@ function showSynonymResult(result) {
     : selectedText;
 
   const synonymOptionsHTML = suggestions.map((syn, i) => `
-    <div class="sph-synonym-option">
+    <div class="sph-synonym-option sph-cascade-item" style="animation-delay: ${i * 60}ms">
       <span class="sph-synonym-text">${escapeHTML(syn)}</span>
       <div class="sph-synonym-actions">
         <button class="sph-synonym-btn sph-synonym-copy" data-index="${i}" title="Copy to clipboard">
@@ -1703,7 +1931,7 @@ function showSynonymResult(result) {
     </div>
   `).join('');
 
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Original</span>
       <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
@@ -1719,13 +1947,14 @@ function showSynonymResult(result) {
         \u2190 Try Another Action
       </button>
     </div>
-  `;
+  `);
 
   // Attach event listeners for each synonym option
   content.querySelectorAll('.sph-synonym-copy').forEach(btn => {
     btn.addEventListener('click', async () => {
       const index = parseInt(btn.dataset.index);
       await copyToClipboard(suggestions[index]);
+      triggerSparkle(btn);
       btn.textContent = '\u2713';
       setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
     });
@@ -1734,6 +1963,7 @@ function showSynonymResult(result) {
   content.querySelectorAll('.sph-synonym-inject').forEach(btn => {
     btn.addEventListener('click', () => {
       const index = parseInt(btn.dataset.index);
+      triggerSparkle(btn);
       replaceTextInEditor(suggestions[index]);
     });
   });
@@ -1765,7 +1995,7 @@ function parseRephraseFromText(text) {
   return options;
 }
 
-function showRephraseResult(result) {
+async function showRephraseResult(result) {
   const content = $('#sph-content');
 
   const options = result.rephraseOptions || parseRephraseFromText(result.text);
@@ -1775,7 +2005,7 @@ function showRephraseResult(result) {
     : selectedText;
 
   const optionsHTML = options.map((opt, i) => `
-    <div class="sph-synonym-option">
+    <div class="sph-synonym-option sph-rephrase-option sph-cascade-item" style="animation-delay: ${i * 60}ms">
       <span class="sph-synonym-text">${escapeHTML(opt)}</span>
       <div class="sph-synonym-actions">
         <button class="sph-synonym-btn sph-synonym-copy" data-index="${i}" title="Copy to clipboard">
@@ -1788,7 +2018,7 @@ function showRephraseResult(result) {
     </div>
   `).join('');
 
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Original</span>
       <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
@@ -1804,12 +2034,13 @@ function showRephraseResult(result) {
         \u2190 Try Another Action
       </button>
     </div>
-  `;
+  `);
 
   content.querySelectorAll('.sph-synonym-copy').forEach(btn => {
     btn.addEventListener('click', async () => {
       const index = parseInt(btn.dataset.index);
       await copyToClipboard(options[index]);
+      triggerSparkle(btn);
       btn.textContent = '\u2713';
       setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
     });
@@ -1818,6 +2049,7 @@ function showRephraseResult(result) {
   content.querySelectorAll('.sph-synonym-inject').forEach(btn => {
     btn.addEventListener('click', () => {
       const index = parseInt(btn.dataset.index);
+      triggerSparkle(btn);
       replaceTextInEditor(options[index]);
     });
   });
@@ -1827,16 +2059,18 @@ function showRephraseResult(result) {
   });
 }
 
-function showGrammarResult(result) {
-  const content = $('#sph-content');
-
+async function showGrammarResult(result) {
   const originalDisplay = selectedText.length > 100
     ? selectedText.substring(0, 100) + '...'
     : selectedText;
 
+  // Build diff-highlighted HTML for corrected text
+  const diff = diffWords(selectedText, result.text);
+  const diffHTML = renderDiffHTML(diff);
+
   let changesHTML = '';
   if (result.changes && result.changes.length > 0) {
-    const items = result.changes.map(c => `<li class="sph-change-item">${escapeHTML(c)}</li>`).join('');
+    const items = result.changes.map((c, i) => `<li class="sph-change-item sph-cascade-item" style="animation-delay: ${i * 60}ms">${escapeHTML(c)}</li>`).join('');
     changesHTML = `
       <div class="sph-section">
         <span class="sph-label">Changes Made</span>
@@ -1845,41 +2079,53 @@ function showGrammarResult(result) {
     `;
   }
 
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Original</span>
       <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
     </div>
     <div class="sph-section">
       <span class="sph-label">Corrected Text</span>
-      <div class="sph-result-text">${escapeHTML(result.text)}</div>
+      <div class="sph-result-text" id="grammar-result-text">${diffHTML}</div>
     </div>
     ${changesHTML}
     <div class="sph-section sph-result-actions">
-      <button class="sph-button" id="replace-text-btn">
+      <button class="sph-button" id="replace-text-btn" disabled>
         Replace in Editor
       </button>
-      <button class="sph-button sph-button-secondary" id="copy-result-btn">
+      <button class="sph-button sph-button-secondary" id="copy-result-btn" disabled>
         Copy to Clipboard
       </button>
       <button class="sph-button sph-button-secondary" id="try-another-btn">
         \u2190 Try Another Action
       </button>
     </div>
-  `;
+  `);
 
-  $('#replace-text-btn').addEventListener('click', () => {
+  // Typewriter effect on the result text
+  const resultEl = $('#grammar-result-text');
+  const replaceBtn = $('#replace-text-btn');
+  const copyBtn = $('#copy-result-btn');
+
+  typewriterEffect(resultEl, result.text).then(() => {
+    // After typewriter completes, swap in the diff-highlighted version
+    resultEl.innerHTML = diffHTML;
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
+  });
+
+  replaceBtn.addEventListener('click', () => {
     replaceTextInEditor(result.text);
   });
 
-  $('#copy-result-btn').addEventListener('click', async () => {
+  copyBtn.addEventListener('click', async () => {
     await copyToClipboard(result.text);
-    const btn = $('#copy-result-btn');
-    btn.textContent = '\u2713 Copied';
-    btn.classList.add('copied');
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = '\u2713 Copied';
+    copyBtn.classList.add('copied');
     setTimeout(() => {
-      btn.textContent = 'Copy to Clipboard';
-      btn.classList.remove('copied');
+      copyBtn.textContent = 'Copy to Clipboard';
+      copyBtn.classList.remove('copied');
     }, 2000);
   });
 
@@ -1888,9 +2134,7 @@ function showGrammarResult(result) {
   });
 }
 
-function showShorterResult(result) {
-  const content = $('#sph-content');
-
+async function showShorterResult(result) {
   const originalDisplay = selectedText.length > 100
     ? selectedText.substring(0, 100) + '...'
     : selectedText;
@@ -1898,7 +2142,7 @@ function showShorterResult(result) {
   const originalWordCount = selectedText.trim().split(/\s+/).filter(Boolean).length;
   const newWordCount = result.text.trim().split(/\s+/).filter(Boolean).length;
 
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Original</span>
       <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
@@ -1906,33 +2150,43 @@ function showShorterResult(result) {
     <div class="sph-section">
       <span class="sph-label">Shortened Text</span>
       <div class="sph-word-count-badge">${originalWordCount} \u2192 ${newWordCount} words</div>
-      <div class="sph-result-text">${escapeHTML(result.text)}</div>
+      <div class="sph-result-text" id="shorter-result-text"></div>
     </div>
     <div class="sph-section sph-result-actions">
-      <button class="sph-button" id="replace-text-btn">
+      <button class="sph-button" id="replace-text-btn" disabled>
         Replace in Editor
       </button>
-      <button class="sph-button sph-button-secondary" id="copy-result-btn">
+      <button class="sph-button sph-button-secondary" id="copy-result-btn" disabled>
         Copy to Clipboard
       </button>
       <button class="sph-button sph-button-secondary" id="try-another-btn">
         \u2190 Try Another Action
       </button>
     </div>
-  `;
+  `);
 
-  $('#replace-text-btn').addEventListener('click', () => {
+  // Typewriter effect
+  const resultEl = $('#shorter-result-text');
+  const replaceBtn = $('#replace-text-btn');
+  const copyBtn = $('#copy-result-btn');
+
+  typewriterEffect(resultEl, result.text).then(() => {
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
+  });
+
+  replaceBtn.addEventListener('click', () => {
     replaceTextInEditor(result.text);
   });
 
-  $('#copy-result-btn').addEventListener('click', async () => {
+  copyBtn.addEventListener('click', async () => {
     await copyToClipboard(result.text);
-    const btn = $('#copy-result-btn');
-    btn.textContent = '\u2713 Copied';
-    btn.classList.add('copied');
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = '\u2713 Copied';
+    copyBtn.classList.add('copied');
     setTimeout(() => {
-      btn.textContent = 'Copy to Clipboard';
-      btn.classList.remove('copied');
+      copyBtn.textContent = 'Copy to Clipboard';
+      copyBtn.classList.remove('copied');
     }, 2000);
   });
 
@@ -1941,10 +2195,8 @@ function showShorterResult(result) {
   });
 }
 
-function showParagraphError(message, action, options) {
-  const content = $('#sph-content');
-
-  content.innerHTML = `
+async function showParagraphError(message, action, options) {
+  await setContentWithTransition(`
     <div class="sph-error">
       <div class="sph-error-text">${escapeHTML(message)}</div>
     </div>
@@ -1956,7 +2208,7 @@ function showParagraphError(message, action, options) {
         ← Back
       </button>
     </div>
-  `;
+  `);
 
   $('#retry-action-btn').addEventListener('click', () => {
     handleParagraphAction(action, options);
@@ -1976,6 +2228,15 @@ function replaceTextInEditor(newText) {
   try {
     // Check if this is a heading input (not a TipTap editor)
     const isInputElement = selectedEditor.tagName === 'INPUT';
+
+    // Save undo state before replacing
+    undoState = {
+      editor: selectedEditor,
+      editorDoc: selectedEditorDoc || selectedEditor.ownerDocument || document,
+      originalText: isInputElement ? selectedEditor.value : selectedText,
+      newText: newText,
+      isInput: isInputElement
+    };
 
     if (isInputElement) {
       // For heading inputs, directly set the value
@@ -2019,7 +2280,12 @@ function replaceTextInEditor(newText) {
       }
     }
 
-    showToast('✓ Text replaced!');
+    // Sparkle from the replace button that triggered this
+    const replaceBtn = $('#replace-text-btn');
+    if (replaceBtn) triggerSparkle(replaceBtn);
+
+    // Show undo toast instead of regular toast
+    showUndoToast();
 
     // Clear selection state
     currentSelection = null;
@@ -2037,11 +2303,112 @@ function replaceTextInEditor(newText) {
   }
 }
 
-// ========== Subject Line Sidebar States ==========
-function showEmptyState() {
+function showUndoToast() {
   if (extensionDisabled) return;
-  const content = $('#sph-content');
-  content.innerHTML = `
+  const topDoc = getTopDocument();
+
+  // Remove any existing undo toast
+  const existing = topDoc.querySelector('.sph-undo-toast');
+  if (existing) existing.remove();
+  if (undoToastTimer) clearTimeout(undoToastTimer);
+
+  const toast = topDoc.createElement('div');
+  toast.className = 'sph-toast sph-undo-toast';
+  toast.innerHTML = `
+    <span>✓ Text replaced</span>
+    <button class="sph-undo-btn">Undo</button>
+  `;
+  topDoc.body.appendChild(toast);
+
+  toast.querySelector('.sph-undo-btn').addEventListener('click', () => {
+    performUndo();
+    toast.remove();
+  });
+
+  undoToastTimer = setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 0.3s ease';
+    setTimeout(() => toast.remove(), 300);
+    undoState = null;
+  }, 5000);
+}
+
+function performUndo() {
+  if (!undoState) return;
+  const { editor, editorDoc, originalText, newText, isInput } = undoState;
+
+  try {
+    if (isInput) {
+      editor.focus();
+      editor.value = originalText;
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      const editorWin = editorDoc.defaultView || window;
+      editor.focus();
+
+      // Find the newText in the editor DOM and select it, then replace with original
+      const range = findTextRange(editor, newText, editorDoc);
+      if (range) {
+        const sel = editorWin.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        editorDoc.execCommand('insertText', false, originalText);
+      } else {
+        showToast('Could not find text to undo.');
+        undoState = null;
+        return;
+      }
+    }
+    showToast('↩ Undone!');
+  } catch (e) {
+    console.error('[Smart.pr Helper] Undo error:', e);
+    showToast('Undo failed.');
+  }
+  undoState = null;
+  if (undoToastTimer) clearTimeout(undoToastTimer);
+}
+
+// Walk text nodes to find a string and return a DOM Range spanning it
+function findTextRange(rootNode, searchText, doc) {
+  const walker = doc.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let fullText = '';
+
+  while (walker.nextNode()) {
+    textNodes.push({ node: walker.currentNode, offset: fullText.length });
+    fullText += walker.currentNode.textContent;
+  }
+
+  const idx = fullText.indexOf(searchText);
+  if (idx === -1) return null;
+
+  const endIdx = idx + searchText.length;
+  const range = doc.createRange();
+
+  for (const { node, offset } of textNodes) {
+    const nodeEnd = offset + node.textContent.length;
+    if (offset <= idx && idx < nodeEnd) {
+      range.setStart(node, idx - offset);
+      break;
+    }
+  }
+
+  for (const { node, offset } of textNodes) {
+    const nodeEnd = offset + node.textContent.length;
+    if (offset < endIdx && endIdx <= nodeEnd) {
+      range.setEnd(node, endIdx - offset);
+      break;
+    }
+  }
+
+  return range;
+}
+
+// ========== Subject Line Sidebar States ==========
+async function showEmptyState() {
+  if (extensionDisabled) return;
+  await setContentWithTransition(`
     <div class="sph-section">
       <p class="sph-description">
         Tell me about your press release and I'll generate compelling subject lines for you.
@@ -2063,7 +2430,7 @@ function showEmptyState() {
         The more details you provide, the better the suggestions!
       </div>
     </div>
-  `;
+  `);
 
   const btn = $('#generate-subject-btn');
   const textarea = $('#pr-description-input');
@@ -2081,10 +2448,9 @@ function showEmptyState() {
   });
 }
 
-function showFilledState(currentSubject) {
+async function showFilledState(currentSubject) {
   if (extensionDisabled) return;
-  const content = $('#sph-content');
-  content.innerHTML = `
+  await setContentWithTransition(`
     <div class="sph-section">
       <span class="sph-label">Current Subject</span>
       <div class="sph-current-subject">${escapeHTML(currentSubject)}</div>
@@ -2097,7 +2463,7 @@ function showFilledState(currentSubject) {
         Generate Alternatives
       </button>
     </div>
-  `;
+  `);
 
   const feedbackBtn = $('#get-feedback-btn');
   feedbackBtn.addEventListener('click', () => getFeedback(currentSubject));
@@ -2106,14 +2472,95 @@ function showFilledState(currentSubject) {
   altBtn.addEventListener('click', () => generateSubjectSuggestions(currentSubject));
 }
 
-function showLoadingState(message = 'Generating suggestions...') {
+const PROGRESSIVE_MESSAGES = {
+  grammar: [
+    'Checking spelling & grammar...',
+    'Scanning for typos...',
+    'Polishing your prose...',
+    'Almost there...'
+  ],
+  rephrase: [
+    'Rephrasing paragraph...',
+    'Exploring different angles...',
+    'Crafting alternatives...',
+    'Putting finishing touches...'
+  ],
+  synonyms: [
+    'Finding synonyms...',
+    'Searching the thesaurus...',
+    'Picking the best words...',
+    'Almost ready...'
+  ],
+  translate: [
+    'Translating text...',
+    'Finding the right words...',
+    'Preserving meaning...',
+    'Wrapping up...'
+  ],
+  shorter: [
+    'Making text shorter...',
+    'Trimming the excess...',
+    'Keeping what matters...',
+    'Nearly done...'
+  ],
+  default: [
+    'Processing...',
+    'Working on it...',
+    'Hang tight...',
+    'Almost there...'
+  ]
+};
+
+function showLoadingState(message = 'Generating suggestions...', action = null) {
   const content = $('#sph-content');
+  let skeletonHTML = '';
+
+  // Clear any previous loading message timer
+  if (loadingMessageTimer) {
+    clearInterval(loadingMessageTimer);
+    loadingMessageTimer = null;
+  }
+
+  if (action === 'synonyms' || action === 'rephrase') {
+    skeletonHTML = `
+      <div class="sph-skeleton sph-skeleton-label"></div>
+      <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 0ms"></div>
+      <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 100ms"></div>
+      <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 200ms"></div>
+    `;
+  } else if (action === 'grammar' || action === 'translate' || action === 'shorter') {
+    skeletonHTML = `
+      <div class="sph-skeleton sph-skeleton-label"></div>
+      <div class="sph-skeleton sph-skeleton-text"></div>
+    `;
+  }
+
   content.innerHTML = `
     <div class="sph-loading">
-      <div class="sph-spinner"></div>
+      ${skeletonHTML || '<div class="sph-spinner"></div>'}
       <div class="sph-loading-text">${message}</div>
     </div>
   `;
+
+  // Start cycling through progressive messages
+  const messages = PROGRESSIVE_MESSAGES[action] || PROGRESSIVE_MESSAGES.default;
+  let msgIndex = 1; // Start at 1 since initial message is already shown
+  loadingMessageTimer = setInterval(() => {
+    const loadingTextEl = content.querySelector('.sph-loading-text');
+    if (loadingTextEl && msgIndex < messages.length) {
+      loadingTextEl.style.opacity = '0';
+      loadingTextEl.style.transition = 'opacity 0.2s ease';
+      setTimeout(() => {
+        loadingTextEl.textContent = messages[msgIndex];
+        loadingTextEl.style.opacity = '1';
+        msgIndex++;
+      }, 200);
+    }
+    if (msgIndex >= messages.length) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+  }, 2500);
 }
 
 function showError(message) {
@@ -2130,9 +2577,7 @@ function showError(message) {
   content.innerHTML = errorHTML + existingContent.replace(/<div class="sph-error">[\s\S]*?<\/div>/, '');
 }
 
-function showSuggestions(suggestions, originalSubject = null) {
-  const content = $('#sph-content');
-
+async function showSuggestions(suggestions, originalSubject = null) {
   let html = '';
 
   if (originalSubject) {
@@ -2149,11 +2594,16 @@ function showSuggestions(suggestions, originalSubject = null) {
       <span class="sph-label">Suggested Subject Lines</span>
       <div class="sph-suggestions">
         ${suggestions.map((suggestion, i) => `
-          <div class="sph-suggestion-item">
+          <div class="sph-suggestion-item sph-cascade-item" style="animation-delay: ${i * 60}ms">
             <div class="sph-suggestion-text">${escapeHTML(suggestion)}</div>
-            <button class="sph-copy-button" data-text="${escapeHTML(suggestion)}">
-              Copy
-            </button>
+            <div class="sph-suggestion-actions">
+              <button class="sph-use-button" data-text="${escapeHTML(suggestion)}">
+                Use
+              </button>
+              <button class="sph-copy-button" data-text="${escapeHTML(suggestion)}">
+                Copy
+              </button>
+            </div>
           </div>
         `).join('')}
       </div>
@@ -2165,13 +2615,36 @@ function showSuggestions(suggestions, originalSubject = null) {
     </div>
   `;
 
-  content.innerHTML = html;
+  await setContentWithTransition(html);
+
+  // Add "Use" (inject) button handlers
+  $$('.sph-use-button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const text = btn.dataset.text;
+      if (subjectField) {
+        // Set the value using React-compatible event dispatching
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(subjectField, text);
+        subjectField.dispatchEvent(new Event('input', { bubbles: true }));
+        subjectField.dispatchEvent(new Event('change', { bubbles: true }));
+        lastSubjectValue = text;
+        triggerSparkle(btn);
+        btn.textContent = '✓ Done';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = 'Use';
+          btn.classList.remove('copied');
+        }, 2000);
+      }
+    });
+  });
 
   // Add copy button handlers
   $$('.sph-copy-button').forEach(btn => {
     btn.addEventListener('click', async () => {
       const text = btn.dataset.text;
       await copyToClipboard(text);
+      triggerSparkle(btn);
 
       // Visual feedback
       const originalText = btn.textContent;
@@ -2367,6 +2840,131 @@ async function getFeedback(subject) {
       content.appendChild(btn);
     }
   }
+}
+
+// ========== Magic UX Utilities ==========
+
+// #12 View Transitions
+function setContentWithTransition(html) {
+  return new Promise((resolve) => {
+    const content = $('#sph-content');
+    content.style.opacity = '0';
+    content.style.transition = 'opacity 0.1s ease';
+    setTimeout(() => {
+      content.innerHTML = html;
+      content.style.opacity = '';
+      content.style.transition = '';
+      content.classList.remove('sph-view-enter');
+      void content.offsetWidth; // force reflow
+      content.classList.add('sph-view-enter');
+      resolve();
+    }, 100);
+  });
+}
+
+// #4 Sparkle Burst
+function triggerSparkle(buttonElement) {
+  if (!buttonElement) return;
+  const rect = buttonElement.getBoundingClientRect();
+  const topDoc = getTopDocument();
+  const colors = ['#FFD580', '#FFBC7F', '#FFB0C0', '#E8B5E8', '#D4A5F5', '#34D399'];
+
+  for (let i = 0; i < 7; i++) {
+    const spark = topDoc.createElement('div');
+    spark.className = 'sph-sparkle';
+    const angle = (i / 7) * Math.PI * 2;
+    const distance = 20 + Math.random() * 25;
+    spark.style.setProperty('--sx', `${Math.cos(angle) * distance}px`);
+    spark.style.setProperty('--sy', `${Math.sin(angle) * distance}px`);
+    spark.style.left = `${rect.left + rect.width / 2 - 3}px`;
+    spark.style.top = `${rect.top + rect.height / 2 - 3}px`;
+    spark.style.position = 'fixed';
+    spark.style.background = colors[i % colors.length];
+    topDoc.body.appendChild(spark);
+    setTimeout(() => spark.remove(), 550);
+  }
+}
+
+// #11 Typewriter Effect
+function typewriterEffect(element, text, speed = 18) {
+  return new Promise((resolve) => {
+    const words = text.split(/(\s+)/); // preserve whitespace
+    let i = 0;
+    element.textContent = '';
+    const cursor = document.createElement('span');
+    cursor.className = 'sph-typing-cursor';
+    cursor.textContent = '|';
+    element.appendChild(cursor);
+
+    const interval = setInterval(() => {
+      if (i < words.length) {
+        cursor.before(document.createTextNode(words[i]));
+        i++;
+      } else {
+        clearInterval(interval);
+        cursor.remove();
+        resolve();
+      }
+    }, speed);
+  });
+}
+
+// #6 Word-Level Diff
+function diffWords(original, corrected) {
+  const origWords = original.split(/(\s+)/);
+  const corrWords = corrected.split(/(\s+)/);
+  const result = [];
+  let oi = 0;
+  for (let ci = 0; ci < corrWords.length; ci++) {
+    const word = corrWords[ci];
+    if (!word.trim()) {
+      result.push({ text: word, changed: false });
+      continue;
+    }
+    // Check if this word matches the original at roughly the same position
+    if (oi < origWords.length && origWords[oi] === word) {
+      result.push({ text: word, changed: false });
+      oi++;
+    } else {
+      // Skip whitespace in original
+      while (oi < origWords.length && !origWords[oi].trim()) oi++;
+      if (oi < origWords.length && origWords[oi] === word) {
+        result.push({ text: word, changed: false });
+        oi++;
+      } else {
+        result.push({ text: word, changed: true });
+        // Try to advance original past the changed word
+        if (oi < origWords.length) oi++;
+      }
+    }
+  }
+  return result;
+}
+
+function renderDiffHTML(diffResult) {
+  return diffResult.map(seg =>
+    seg.changed
+      ? `<span class="sph-diff-highlight">${escapeHTML(seg.text)}</span>`
+      : escapeHTML(seg.text)
+  ).join('');
+}
+
+// #5 Smart Contextual Greetings
+function getNudgeMessage(type) {
+  const hour = new Date().getHours();
+  let greeting;
+  if (hour >= 5 && hour < 12) {
+    greeting = 'Good morning!';
+  } else if (hour >= 12 && hour < 17) {
+    greeting = 'Hey there!';
+  } else {
+    greeting = 'Still working?';
+  }
+
+  if (type === 'empty') {
+    return `${greeting} Need help writing a subject line?`;
+  }
+  return `${greeting} Want feedback on your subject line?`;
 }
 
 // ========== Helper Functions ==========

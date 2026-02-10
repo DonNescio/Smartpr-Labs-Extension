@@ -432,7 +432,7 @@
       color: #2D1B4E;
       line-height: 1.6;
       border: 1.5px solid rgba(52,211,153,0.25);
-      font-weight: 500;
+      font-weight: normal;
       word-break: break-word;
       white-space: pre-wrap;
       margin-bottom: 12px;
@@ -457,6 +457,12 @@
       transition: all 0.2s ease;
     }
 
+    .synonym-option.rephrase-option {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+    }
+
     .synonym-option:hover {
       border-color: rgba(255, 188, 127, 0.5);
       background: rgba(255, 255, 255, 0.95);
@@ -464,7 +470,7 @@
 
     .synonym-text {
       font-size: 12px;
-      font-weight: 500;
+      font-weight: normal;
       color: #2D1B4E;
       flex: 1;
       line-height: 1.4;
@@ -477,6 +483,10 @@
       gap: 4px;
       margin-left: 8px;
       flex-shrink: 0;
+    }
+
+    .rephrase-option .synonym-actions {
+      margin-left: 0;
     }
 
     .synonym-btn {
@@ -641,6 +651,7 @@
     /* Feedback Area */
     #popup-feedback-area {
       margin-top: 6px;
+      text-align: center;
     }
 
     .popup-feedback-form {
@@ -715,6 +726,103 @@
 
     .popup-feedback-cancel:hover {
       color: #6b7280;
+    }
+
+    /* Magic UX: Cascade Animation */
+    @keyframes cascadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .cascade-item {
+      animation: cascadeIn 0.3s ease-out both;
+    }
+
+    /* Magic UX: Skeleton Loading */
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    .popup-skeleton {
+      background: linear-gradient(90deg, rgba(232,181,232,0.1) 25%, rgba(255,213,128,0.18) 50%, rgba(232,181,232,0.1) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s ease infinite;
+      border-radius: 10px;
+    }
+    .popup-skeleton-card {
+      height: 44px;
+      margin-bottom: 6px;
+    }
+    .popup-skeleton-text {
+      height: 70px;
+      margin-bottom: 8px;
+    }
+    .popup-skeleton-label {
+      height: 12px;
+      width: 100px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+    }
+
+    /* Magic UX: View Transition */
+    @keyframes viewFadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .popup-view-enter {
+      animation: viewFadeIn 0.2s ease-out;
+    }
+
+    /* Magic UX: Diff Highlight */
+    .popup-diff-highlight {
+      background: rgba(255, 188, 127, 0.25);
+      border-radius: 3px;
+      padding: 1px 2px;
+    }
+
+    /* Magic UX: Typing Cursor */
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    .popup-typing-cursor {
+      animation: blink 0.7s step-end infinite;
+      color: #D4A5F5;
+      font-weight: 300;
+      margin-left: 1px;
+    }
+
+    /* Tone Selector */
+    .popup-tone-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .popup-tone-btn {
+      padding: 9px 10px;
+      background: rgba(255, 255, 255, 0.8);
+      border: 1.5px solid rgba(232, 181, 232, 0.3);
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #2D1B4E;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: center;
+      font-family: inherit;
+    }
+
+    .popup-tone-btn:hover {
+      background: linear-gradient(135deg, #FFD580, #FFBC7F, #FFB0C0, #E8B5E8);
+      border-color: transparent;
+      color: white;
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(255, 188, 127, 0.25);
+    }
+
+    .popup-tone-btn:active {
+      transform: translateY(0);
     }
   </style>
 </head>

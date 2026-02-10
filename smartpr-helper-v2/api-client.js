@@ -47,17 +47,26 @@ async function callProxyAPI(endpoint, payload) {
       };
     }
 
-    // Make API request
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        email: email,
-        ...payload
-      })
-    });
+    // Make API request with 30s timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    let response;
+    try {
+      response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          email: email,
+          ...payload
+        }),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     // Handle HTTP errors
     if (!response.ok) {
@@ -109,6 +118,14 @@ async function callProxyAPI(endpoint, payload) {
       throw {
         code: 'EXTENSION_CONTEXT_INVALIDATED',
         message: ERROR_MESSAGES.EXTENSION_CONTEXT_INVALIDATED,
+        originalError: error
+      };
+    }
+    // Timeout errors (AbortController)
+    if (error.name === 'AbortError') {
+      throw {
+        code: 'NETWORK_ERROR',
+        message: ERROR_MESSAGES.NETWORK_ERROR,
         originalError: error
       };
     }

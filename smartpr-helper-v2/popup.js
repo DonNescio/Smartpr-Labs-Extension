@@ -9,6 +9,8 @@ const EXTENSION_DISABLED_KEY = 'smartpr_helper_disabled';
 
 // Track current context for "back" navigation
 let currentContext = null;
+let popupLoadingMessageTimer = null;
+let popupBusy = false; // Prevents double-clicks firing concurrent API calls
 
 // ========== Toggle & Settings ==========
 function renderExtensionToggle(disabled) {
@@ -122,6 +124,84 @@ function escapeHTML(str) {
   return div.innerHTML;
 }
 
+// Magic UX: View Transitions
+function setPopupContentWithTransition(html) {
+  return new Promise((resolve) => {
+    mainContent.style.opacity = '0';
+    mainContent.style.transition = 'opacity 0.1s ease';
+    setTimeout(() => {
+      mainContent.innerHTML = html;
+      mainContent.style.opacity = '';
+      mainContent.style.transition = '';
+      mainContent.classList.remove('popup-view-enter');
+      void mainContent.offsetWidth;
+      mainContent.classList.add('popup-view-enter');
+      resolve();
+    }, 100);
+  });
+}
+
+// Magic UX: Typewriter Effect
+function popupTypewriterEffect(element, text, speed = 15) {
+  return new Promise((resolve) => {
+    const words = text.split(/(\s+)/);
+    let i = 0;
+    element.textContent = '';
+    const cursor = document.createElement('span');
+    cursor.className = 'popup-typing-cursor';
+    cursor.textContent = '|';
+    element.appendChild(cursor);
+
+    const interval = setInterval(() => {
+      if (i < words.length) {
+        cursor.before(document.createTextNode(words[i]));
+        i++;
+      } else {
+        clearInterval(interval);
+        cursor.remove();
+        resolve();
+      }
+    }, speed);
+  });
+}
+
+// Magic UX: Word-Level Diff
+function popupDiffWords(original, corrected) {
+  const origWords = original.split(/(\s+)/);
+  const corrWords = corrected.split(/(\s+)/);
+  const result = [];
+  let oi = 0;
+  for (let ci = 0; ci < corrWords.length; ci++) {
+    const word = corrWords[ci];
+    if (!word.trim()) {
+      result.push({ text: word, changed: false });
+      continue;
+    }
+    if (oi < origWords.length && origWords[oi] === word) {
+      result.push({ text: word, changed: false });
+      oi++;
+    } else {
+      while (oi < origWords.length && !origWords[oi].trim()) oi++;
+      if (oi < origWords.length && origWords[oi] === word) {
+        result.push({ text: word, changed: false });
+        oi++;
+      } else {
+        result.push({ text: word, changed: true });
+        if (oi < origWords.length) oi++;
+      }
+    }
+  }
+  return result;
+}
+
+function popupRenderDiffHTML(diffResult) {
+  return diffResult.map(seg =>
+    seg.changed
+      ? `<span class="popup-diff-highlight">${escapeHTML(seg.text)}</span>`
+      : escapeHTML(seg.text)
+  ).join('');
+}
+
 function renderFeedbackMarkup(text) {
   if (!text) return '';
   const escaped = escapeHTML(text);
@@ -161,13 +241,60 @@ async function setSubjectOnPage(value) {
 }
 
 // ========== Loading & Error States ==========
-function showPopupLoading(message = 'Generating...') {
+const POPUP_PROGRESSIVE_MESSAGES = {
+  grammar: ['Checking spelling & grammar...', 'Scanning for typos...', 'Polishing your prose...', 'Almost there...'],
+  rephrase: ['Rephrasing...', 'Exploring angles...', 'Crafting alternatives...', 'Finishing up...'],
+  synonyms: ['Finding synonyms...', 'Searching the thesaurus...', 'Picking the best words...', 'Almost ready...'],
+  translate: ['Translating text...', 'Finding the right words...', 'Preserving meaning...', 'Wrapping up...'],
+  shorter: ['Making text shorter...', 'Trimming the excess...', 'Keeping what matters...', 'Nearly done...'],
+  default: ['Processing...', 'Working on it...', 'Hang tight...', 'Almost there...']
+};
+
+function showPopupLoading(message = 'Generating...', action = null) {
+  if (popupLoadingMessageTimer) {
+    clearInterval(popupLoadingMessageTimer);
+    popupLoadingMessageTimer = null;
+  }
+
+  let skeletonHTML = '';
+  if (action === 'synonyms' || action === 'rephrase') {
+    skeletonHTML = `
+      <div class="popup-skeleton popup-skeleton-label"></div>
+      <div class="popup-skeleton popup-skeleton-card cascade-item" style="animation-delay: 0ms"></div>
+      <div class="popup-skeleton popup-skeleton-card cascade-item" style="animation-delay: 100ms"></div>
+      <div class="popup-skeleton popup-skeleton-card cascade-item" style="animation-delay: 200ms"></div>
+    `;
+  } else if (action === 'grammar' || action === 'translate' || action === 'shorter') {
+    skeletonHTML = `
+      <div class="popup-skeleton popup-skeleton-label"></div>
+      <div class="popup-skeleton popup-skeleton-text"></div>
+    `;
+  }
   mainContent.innerHTML = `
     <div class="popup-loading">
-      <div class="popup-spinner"></div>
+      ${skeletonHTML || '<div class="popup-spinner"></div>'}
       <span class="popup-loading-text">${escapeHTML(message)}</span>
     </div>
   `;
+
+  const messages = POPUP_PROGRESSIVE_MESSAGES[action] || POPUP_PROGRESSIVE_MESSAGES.default;
+  let msgIndex = 1;
+  popupLoadingMessageTimer = setInterval(() => {
+    const el = mainContent.querySelector('.popup-loading-text');
+    if (el && msgIndex < messages.length) {
+      el.style.opacity = '0';
+      el.style.transition = 'opacity 0.2s ease';
+      setTimeout(() => {
+        el.textContent = messages[msgIndex];
+        el.style.opacity = '1';
+        msgIndex++;
+      }, 200);
+    }
+    if (msgIndex >= messages.length) {
+      clearInterval(popupLoadingMessageTimer);
+      popupLoadingMessageTimer = null;
+    }
+  }, 2500);
 }
 
 function showPopupError(message) {
@@ -241,6 +368,8 @@ function renderFilledSubjectHelper(value) {
 }
 
 async function generateSubjects(currentSubject = '', description = '') {
+  if (popupBusy) return;
+  popupBusy = true;
   showPopupLoading('Generating subject lines...');
 
   try {
@@ -268,10 +397,14 @@ async function generateSubjects(currentSubject = '', description = '') {
   } catch (error) {
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     showPopupError(errorMessage);
+  } finally {
+    popupBusy = false;
   }
 }
 
 async function getFeedback(subject) {
+  if (popupBusy) return;
+  popupBusy = true;
   showPopupLoading('Analyzing subject line...');
 
   try {
@@ -299,6 +432,8 @@ async function getFeedback(subject) {
   } catch (error) {
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     showPopupError(errorMessage);
+  } finally {
+    popupBusy = false;
   }
 }
 
@@ -318,7 +453,7 @@ function renderSuggestions(suggestions, originalSubject) {
     <div class="section">
       <span class="section-label">Suggestions</span>
       ${suggestions.map((s, i) => `
-        <div class="suggestion-item">
+        <div class="suggestion-item cascade-item" style="animation-delay: ${i * 60}ms">
           <div class="suggestion-text">${escapeHTML(s)}</div>
           <div class="suggestion-actions">
             <button class="btn-icon btn-use" data-index="${i}" title="Apply to subject field">Use</button>
@@ -476,10 +611,52 @@ function renderParagraphCoachActive(text) {
       const action = btn.dataset.action;
       if (action === 'translate') {
         renderTranslateOptions();
+      } else if (action === 'rephrase') {
+        renderToneSelector();
       } else {
         handlePopupParagraphAction(action);
       }
     });
+  });
+}
+
+function renderToneSelector() {
+  const displayText = popupSelectedText.length > 100 ? popupSelectedText.substring(0, 100) + '...' : popupSelectedText;
+
+  mainContent.innerHTML = `
+    <div class="section">
+      <span class="section-label">Selected Text</span>
+      <div class="subject-value" style="font-size: 12px; opacity: 0.8;">${escapeHTML(displayText)}</div>
+    </div>
+    <div class="section">
+      <button class="btn btn-primary" id="rephrase-no-tone">Rephrase</button>
+    </div>
+    <div class="section">
+      <span class="section-label">Or pick a tone</span>
+      <div class="popup-tone-buttons">
+        <button class="popup-tone-btn" data-tone="formal">Formal</button>
+        <button class="popup-tone-btn" data-tone="friendly">Friendly</button>
+        <button class="popup-tone-btn" data-tone="persuasive">Persuasive</button>
+        <button class="popup-tone-btn" data-tone="concise">Concise</button>
+      </div>
+    </div>
+    <div class="section">
+      <button class="btn btn-secondary" id="back-to-actions">\u2190 Back</button>
+    </div>
+  `;
+
+  document.getElementById('rephrase-no-tone').addEventListener('click', () => {
+    handlePopupParagraphAction('rephrase');
+  });
+
+  mainContent.querySelectorAll('.popup-tone-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handlePopupParagraphAction('rephrase', { tone: btn.dataset.tone });
+    });
+  });
+
+  document.getElementById('back-to-actions').addEventListener('click', () => {
+    renderParagraphCoachActive(popupSelectedText);
   });
 }
 
@@ -533,8 +710,10 @@ function renderTranslateOptions() {
 }
 
 async function handlePopupParagraphAction(action, options = {}) {
+  if (popupBusy) return;
   const text = popupSelectedText;
   if (!text) return;
+  popupBusy = true;
 
   let loadingMessage = 'Processing...';
   switch (action) {
@@ -545,10 +724,14 @@ async function handlePopupParagraphAction(action, options = {}) {
     case 'shorter': loadingMessage = 'Making text shorter...'; break;
   }
 
-  showPopupLoading(loadingMessage);
+  showPopupLoading(loadingMessage, action);
 
   try {
     const result = await window.SmartPRAPI.processParagraph(text, action, options);
+    if (popupLoadingMessageTimer) {
+      clearInterval(popupLoadingMessageTimer);
+      popupLoadingMessageTimer = null;
+    }
     if (action === 'synonyms') {
       renderSynonymResult(result);
     } else if (action === 'rephrase') {
@@ -561,6 +744,10 @@ async function handlePopupParagraphAction(action, options = {}) {
       renderParagraphResult(result.text, action, options);
     }
   } catch (error) {
+    if (popupLoadingMessageTimer) {
+      clearInterval(popupLoadingMessageTimer);
+      popupLoadingMessageTimer = null;
+    }
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     mainContent.innerHTML = `
       <div class="popup-error">${escapeHTML(errorMessage)}</div>
@@ -571,6 +758,8 @@ async function handlePopupParagraphAction(action, options = {}) {
     `;
     document.getElementById('retry-btn').addEventListener('click', () => handlePopupParagraphAction(action, options));
     document.getElementById('back-btn').addEventListener('click', () => renderParagraphCoachActive(popupSelectedText));
+  } finally {
+    popupBusy = false;
   }
 }
 
@@ -593,27 +782,34 @@ function renderParagraphResult(resultText, action, options) {
     </div>
     <div class="section">
       <span class="section-label">${escapeHTML(actionLabel)}</span>
-      <div class="result-box">${escapeHTML(resultText)}</div>
+      <div class="result-box" id="popup-paragraph-result"></div>
     </div>
     <div class="section">
-      <button class="btn btn-primary" id="replace-btn">Replace in Editor</button>
-      <button class="btn btn-secondary" id="copy-result-btn">Copy to Clipboard</button>
+      <button class="btn btn-primary" id="replace-btn" disabled>Replace in Editor</button>
+      <button class="btn btn-secondary" id="copy-result-btn" disabled>Copy to Clipboard</button>
       <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
     </div>
   `;
 
-  document.getElementById('replace-btn').addEventListener('click', async () => {
-    await replaceEditorText(resultText);
-    const btn = document.getElementById('replace-btn');
-    btn.textContent = '\u2713 Replaced!';
-    btn.disabled = true;
+  const resultElement = document.getElementById('popup-paragraph-result');
+  const replaceBtn = document.getElementById('replace-btn');
+  const copyBtn = document.getElementById('copy-result-btn');
+
+  popupTypewriterEffect(resultElement, resultText).then(() => {
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
   });
 
-  document.getElementById('copy-result-btn').addEventListener('click', async () => {
+  replaceBtn.addEventListener('click', async () => {
+    await replaceEditorText(resultText);
+    replaceBtn.textContent = '\u2713 Replaced!';
+    replaceBtn.disabled = true;
+  });
+
+  copyBtn.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(resultText); } catch {}
-    const btn = document.getElementById('copy-result-btn');
-    btn.textContent = '\u2713 Copied';
-    setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
+    copyBtn.textContent = '\u2713 Copied';
+    setTimeout(() => { copyBtn.textContent = 'Copy to Clipboard'; }, 2000);
   });
 
   document.getElementById('another-action-btn').addEventListener('click', () => {
@@ -664,7 +860,7 @@ function renderSynonymResult(result) {
     : popupSelectedText;
 
   const synonymOptionsHTML = suggestions.map((syn, i) => `
-    <div class="synonym-option">
+    <div class="synonym-option cascade-item" style="animation-delay: ${i * 60}ms">
       <span class="synonym-text">${escapeHTML(syn)}</span>
       <div class="synonym-actions">
         <button class="synonym-btn synonym-copy" data-index="${i}" title="Copy to clipboard">Copy</button>
@@ -739,7 +935,7 @@ function renderRephraseResult(result) {
     : popupSelectedText;
 
   const optionsHTML = options.map((opt, i) => `
-    <div class="synonym-option">
+    <div class="synonym-option rephrase-option cascade-item" style="animation-delay: ${i * 60}ms">
       <span class="synonym-text">${escapeHTML(opt)}</span>
       <div class="synonym-actions">
         <button class="synonym-btn synonym-copy" data-index="${i}" title="Copy to clipboard">Copy</button>
@@ -792,9 +988,12 @@ function renderGrammarResult(result) {
     ? popupSelectedText.substring(0, 100) + '...'
     : popupSelectedText;
 
+  const diffResult = popupDiffWords(popupSelectedText, result.text);
+  const diffHTML = popupRenderDiffHTML(diffResult);
+
   let changesHTML = '';
   if (result.changes && result.changes.length > 0) {
-    const items = result.changes.map(c => `<li class="change-item">${escapeHTML(c)}</li>`).join('');
+    const items = result.changes.map((c, i) => `<li class="change-item cascade-item" style="animation-delay: ${i * 60}ms">${escapeHTML(c)}</li>`).join('');
     changesHTML = `
       <div class="section">
         <span class="section-label">Changes Made</span>
@@ -810,28 +1009,36 @@ function renderGrammarResult(result) {
     </div>
     <div class="section">
       <span class="section-label">Corrected Text</span>
-      <div class="result-box">${escapeHTML(result.text)}</div>
+      <div class="result-box" id="popup-grammar-result"></div>
     </div>
     ${changesHTML}
     <div class="section">
-      <button class="btn btn-primary" id="replace-btn">Replace in Editor</button>
-      <button class="btn btn-secondary" id="copy-result-btn">Copy to Clipboard</button>
+      <button class="btn btn-primary" id="replace-btn" disabled>Replace in Editor</button>
+      <button class="btn btn-secondary" id="copy-result-btn" disabled>Copy to Clipboard</button>
       <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
     </div>
   `;
 
-  document.getElementById('replace-btn').addEventListener('click', async () => {
-    await replaceEditorText(result.text);
-    const btn = document.getElementById('replace-btn');
-    btn.textContent = '\u2713 Replaced!';
-    btn.disabled = true;
+  const resultElement = document.getElementById('popup-grammar-result');
+  const replaceBtn = document.getElementById('replace-btn');
+  const copyBtn = document.getElementById('copy-result-btn');
+
+  popupTypewriterEffect(resultElement, result.text).then(() => {
+    resultElement.innerHTML = diffHTML;
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
   });
 
-  document.getElementById('copy-result-btn').addEventListener('click', async () => {
+  replaceBtn.addEventListener('click', async () => {
+    await replaceEditorText(result.text);
+    replaceBtn.textContent = '\u2713 Replaced!';
+    replaceBtn.disabled = true;
+  });
+
+  copyBtn.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(result.text); } catch {}
-    const btn = document.getElementById('copy-result-btn');
-    btn.textContent = '\u2713 Copied';
-    setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
+    copyBtn.textContent = '\u2713 Copied';
+    setTimeout(() => { copyBtn.textContent = 'Copy to Clipboard'; }, 2000);
   });
 
   document.getElementById('another-action-btn').addEventListener('click', () => {
@@ -855,27 +1062,34 @@ function renderShorterResult(result) {
     <div class="section">
       <span class="section-label">Shortened Text</span>
       <div class="word-count-badge">${originalWordCount} \u2192 ${newWordCount} words</div>
-      <div class="result-box">${escapeHTML(result.text)}</div>
+      <div class="result-box" id="popup-shorter-result"></div>
     </div>
     <div class="section">
-      <button class="btn btn-primary" id="replace-btn">Replace in Editor</button>
-      <button class="btn btn-secondary" id="copy-result-btn">Copy to Clipboard</button>
+      <button class="btn btn-primary" id="replace-btn" disabled>Replace in Editor</button>
+      <button class="btn btn-secondary" id="copy-result-btn" disabled>Copy to Clipboard</button>
       <button class="btn btn-secondary" id="another-action-btn">\u2190 Try Another Action</button>
     </div>
   `;
 
-  document.getElementById('replace-btn').addEventListener('click', async () => {
-    await replaceEditorText(result.text);
-    const btn = document.getElementById('replace-btn');
-    btn.textContent = '\u2713 Replaced!';
-    btn.disabled = true;
+  const resultElement = document.getElementById('popup-shorter-result');
+  const replaceBtn = document.getElementById('replace-btn');
+  const copyBtn = document.getElementById('copy-result-btn');
+
+  popupTypewriterEffect(resultElement, result.text).then(() => {
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
   });
 
-  document.getElementById('copy-result-btn').addEventListener('click', async () => {
+  replaceBtn.addEventListener('click', async () => {
+    await replaceEditorText(result.text);
+    replaceBtn.textContent = '\u2713 Replaced!';
+    replaceBtn.disabled = true;
+  });
+
+  copyBtn.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(result.text); } catch {}
-    const btn = document.getElementById('copy-result-btn');
-    btn.textContent = '\u2713 Copied';
-    setTimeout(() => { btn.textContent = 'Copy to Clipboard'; }, 2000);
+    copyBtn.textContent = '\u2713 Copied';
+    setTimeout(() => { copyBtn.textContent = 'Copy to Clipboard'; }, 2000);
   });
 
   document.getElementById('another-action-btn').addEventListener('click', () => {
@@ -951,6 +1165,18 @@ function renderForContext(context) {
       break;
   }
 }
+
+// ========== Cleanup on popup close ==========
+window.addEventListener('unload', () => {
+  if (popupLoadingMessageTimer) {
+    clearInterval(popupLoadingMessageTimer);
+    popupLoadingMessageTimer = null;
+  }
+  if (selectionPollTimer) {
+    clearInterval(selectionPollTimer);
+    selectionPollTimer = null;
+  }
+});
 
 // ========== Init ==========
 async function initPopup() {
