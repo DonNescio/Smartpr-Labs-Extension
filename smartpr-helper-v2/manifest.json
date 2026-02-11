@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Smart.pr Assistant",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
