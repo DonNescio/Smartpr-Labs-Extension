@@ -12,8 +12,7 @@
     }
 
     body {
-      width: 380px;
-      max-height: 580px;
+      width: 320px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       color: #111827;
       display: flex;
@@ -40,51 +39,10 @@
       font-weight: 600;
     }
 
-    #main-content {
-      flex: 1;
-      overflow-y: auto;
+    .content {
       padding: 16px 20px;
-      min-height: 100px;
     }
 
-    .footer {
-      padding: 10px 20px 14px;
-      border-top: 1px solid #e5e7eb;
-      background: #fafafa;
-    }
-
-    /* Loading */
-    .popup-loading {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 40px 20px;
-      gap: 12px;
-    }
-
-    .popup-spinner {
-      width: 28px;
-      height: 28px;
-      border: 3px solid transparent;
-      border-top-color: #FFD580;
-      border-right-color: #FFB0C0;
-      border-bottom-color: #E8B5E8;
-      border-left-color: #D4A5F5;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    .popup-loading-text {
-      font-size: 13px;
-      color: #6b7280;
-    }
-
-    /* Section */
     .section {
       margin-bottom: 14px;
     }
@@ -103,490 +61,188 @@
       display: block;
     }
 
-    /* Subject value display */
-    .subject-value {
-      background: linear-gradient(135deg, rgba(255,213,128,0.12), rgba(255,176,192,0.12));
+    /* Email display */
+    .email-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
       padding: 10px 14px;
+      background: linear-gradient(135deg, rgba(255,213,128,0.08), rgba(232,181,232,0.08));
+      border: 1.5px solid rgba(232,181,232,0.2);
       border-radius: 10px;
-      font-size: 14px;
-      color: #2D1B4E;
-      line-height: 1.5;
-      margin-bottom: 12px;
-      border: 1px solid rgba(255,188,127,0.25);
-      font-weight: 500;
-      word-break: break-word;
     }
 
-    .subject-value.empty {
+    .email-value {
+      font-size: 13px;
+      color: #2D1B4E;
+      font-weight: 500;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .email-value.empty {
       color: #9B8FB8;
       font-style: italic;
+      font-weight: 400;
     }
 
-    /* Textarea */
-    .popup-textarea {
-      width: 100%;
-      padding: 10px 14px;
-      background: rgba(255,255,255,0.9);
+    .email-edit-btn {
+      background: none;
+      border: 1px solid rgba(232,181,232,0.3);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      color: #6B5B8C;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .email-edit-btn:hover {
+      background: rgba(232,181,232,0.15);
+      border-color: rgba(232,181,232,0.5);
+    }
+
+    /* Email edit form */
+    .email-form {
+      display: flex;
+      gap: 6px;
+    }
+
+    .email-input {
+      flex: 1;
+      padding: 8px 12px;
+      background: white;
       border: 1.5px solid rgba(232,181,232,0.3);
-      border-radius: 10px;
+      border-radius: 8px;
       font-size: 13px;
       font-family: inherit;
       color: #2D1B4E;
-      line-height: 1.5;
-      resize: vertical;
-      margin-bottom: 10px;
-      min-height: 70px;
+      min-width: 0;
     }
 
-    .popup-textarea::placeholder {
+    .email-input::placeholder {
       color: #9B8FB8;
       opacity: 0.7;
     }
 
-    .popup-textarea:focus {
+    .email-input:focus {
       outline: none;
       border-color: rgba(255,188,127,0.5);
       box-shadow: 0 0 0 3px rgba(255,188,127,0.08);
     }
 
-    /* Buttons */
-    .btn {
-      width: 100%;
-      padding: 10px 16px;
-      border: none;
-      border-radius: 10px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-      margin-bottom: 6px;
-    }
-
-    .btn-primary {
-      background: linear-gradient(135deg, #FFD580, #FFBC7F, #FFB0C0, #E8B5E8);
-      color: white;
-      box-shadow: 0 2px 8px rgba(255,188,127,0.25);
-    }
-
-    .btn-primary:hover {
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(255,188,127,0.35);
-    }
-
-    .btn-primary:disabled {
-      background: linear-gradient(135deg, #E5E7EB, #D1D5DB);
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .btn-secondary {
-      background: rgba(255,255,255,0.7);
-      color: #2D1B4E;
-      border: 1.5px solid rgba(232,181,232,0.3);
-    }
-
-    .btn-secondary:hover {
-      background: rgba(255,255,255,0.95);
-      border-color: rgba(232,181,232,0.5);
-    }
-
-    .btn-row {
-      display: flex;
-      gap: 6px;
-      margin-bottom: 6px;
-    }
-
-    .btn-row .btn {
-      flex: 1;
-      margin-bottom: 0;
-    }
-
-    /* Suggestions */
-    .suggestion-item {
-      background: rgba(255,255,255,0.8);
-      border: 1.5px solid rgba(232,181,232,0.2);
-      border-radius: 10px;
-      padding: 10px 14px;
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 8px;
-      margin-bottom: 8px;
-      transition: all 0.2s;
-    }
-
-    .suggestion-item:hover {
-      border-color: rgba(255,188,127,0.5);
-      box-shadow: 0 2px 8px rgba(255,188,127,0.15);
-    }
-
-    .suggestion-text {
-      flex: 1;
-      font-size: 13px;
-      color: #2D1B4E;
-      line-height: 1.5;
-      font-weight: 500;
-    }
-
-    .suggestion-actions {
-      display: flex;
-      gap: 4px;
-      flex-shrink: 0;
-    }
-
-    .btn-icon {
-      background: linear-gradient(135deg, #E8B5E8, #D4A5F5);
+    .email-save-btn {
+      padding: 8px 14px;
+      background: linear-gradient(135deg, #FFD580, #FFBC7F, #E8B5E8);
       color: white;
       border: none;
-      border-radius: 6px;
-      padding: 5px 10px;
-      font-size: 11px;
-      font-weight: 600;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: all 0.2s;
-    }
-
-    .btn-icon:hover {
-      transform: scale(1.05);
-    }
-
-    .btn-icon.btn-use {
-      background: linear-gradient(135deg, #FFD580, #FFBC7F);
-    }
-
-    .btn-icon.copied, .btn-icon.used {
-      background: linear-gradient(135deg, #86EFAC, #34D399);
-    }
-
-    /* Feedback */
-    .feedback-box {
-      background: #f9fafb;
-      padding: 12px 14px;
-      border-radius: 10px;
-      font-size: 13px;
-      line-height: 1.6;
-      color: #374151;
-      margin-bottom: 12px;
-    }
-
-    .feedback-box p {
-      margin-bottom: 6px;
-    }
-
-    .feedback-box ol {
-      padding-left: 18px;
-      margin: 6px 0;
-    }
-
-    .feedback-box li {
-      margin-bottom: 4px;
-    }
-
-    /* Error */
-    .popup-error {
-      background: linear-gradient(135deg, rgba(255,180,180,0.15), rgba(255,200,200,0.15));
-      border: 1.5px solid rgba(255,120,120,0.25);
-      border-radius: 10px;
-      padding: 10px 14px;
-      margin-bottom: 10px;
-      font-size: 13px;
-      color: #991b1b;
-      line-height: 1.5;
-    }
-
-    /* Overview Page */
-    .overview-intro {
-      font-size: 13px;
-      color: #6b7280;
-      line-height: 1.6;
-      margin-bottom: 16px;
-    }
-
-    .feature-card {
-      background: rgba(255,255,255,0.8);
-      border: 1.5px solid rgba(232,181,232,0.2);
-      border-radius: 12px;
-      padding: 14px 16px;
-      margin-bottom: 10px;
-      transition: all 0.2s;
-    }
-
-    .feature-card:hover {
-      border-color: rgba(255,188,127,0.4);
-      box-shadow: 0 2px 8px rgba(255,188,127,0.12);
-    }
-
-    .feature-icon {
-      font-size: 20px;
-      margin-bottom: 6px;
-    }
-
-    .feature-title {
-      font-size: 14px;
-      font-weight: 600;
-      color: #2D1B4E;
-      margin-bottom: 4px;
-    }
-
-    .feature-desc {
+      border-radius: 8px;
       font-size: 12px;
-      color: #6b7280;
-      line-height: 1.5;
-    }
-
-    .feature-how {
-      font-size: 11px;
-      color: #9B8FB8;
-      margin-top: 6px;
-      font-weight: 500;
-    }
-
-    /* Editor mode */
-    .editor-status {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 14px;
-      background: linear-gradient(135deg, rgba(134,239,172,0.12), rgba(52,211,153,0.12));
-      border: 1.5px solid rgba(52,211,153,0.25);
-      border-radius: 10px;
-      margin-bottom: 12px;
-      font-size: 13px;
-      color: #166534;
-      font-weight: 500;
-    }
-
-    .action-list {
-      font-size: 13px;
-      color: #374151;
-      line-height: 1.8;
-    }
-
-    .action-list-item {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 4px;
-    }
-
-    .action-list-icon {
-      font-size: 14px;
-      width: 20px;
-      text-align: center;
-      flex-shrink: 0;
-    }
-
-    /* Action Grid (Paragraph Coach active) */
-    .action-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-
-    .action-grid-btn {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      padding: 14px 10px;
-      background: rgba(255,255,255,0.8);
-      border: 1.5px solid rgba(232,181,232,0.25);
-      border-radius: 10px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-
-    .action-grid-btn:hover {
-      background: rgba(255,255,255,0.95);
-      border-color: rgba(255,188,127,0.5);
-      box-shadow: 0 2px 8px rgba(255,188,127,0.2);
-      transform: translateY(-1px);
-    }
-
-    .action-grid-btn:active {
-      transform: translateY(0);
-    }
-
-    .action-grid-icon {
-      font-size: 18px;
-      line-height: 1;
-    }
-
-    .action-grid-label {
-      font-size: 11px;
-      font-weight: 600;
-      color: #2D1B4E;
-      text-align: center;
-      line-height: 1.3;
-    }
-
-    .action-grid-desc {
-      font-size: 10px;
-      font-weight: 400;
-      color: #9B8FB8;
-      text-align: center;
-      line-height: 1.3;
-    }
-
-    /* Result box */
-    .result-box {
-      background: linear-gradient(135deg, rgba(134,239,172,0.12), rgba(52,211,153,0.12));
-      padding: 12px 14px;
-      border-radius: 10px;
-      font-size: 13px;
-      color: #2D1B4E;
-      line-height: 1.6;
-      border: 1.5px solid rgba(52,211,153,0.25);
-      font-weight: normal;
-      word-break: break-word;
-      white-space: pre-wrap;
-      margin-bottom: 12px;
-    }
-
-    /* Synonym Options */
-    .synonym-list {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      margin-bottom: 12px;
-    }
-
-    .synonym-option {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 9px 12px;
-      background: rgba(255, 255, 255, 0.85);
-      border: 1.5px solid rgba(232, 181, 232, 0.25);
-      border-radius: 10px;
-      transition: all 0.2s ease;
-    }
-
-    .synonym-option.rephrase-option {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 6px;
-    }
-
-    .synonym-option:hover {
-      border-color: rgba(255, 188, 127, 0.5);
-      background: rgba(255, 255, 255, 0.95);
-    }
-
-    .synonym-text {
-      font-size: 12px;
-      font-weight: normal;
-      color: #2D1B4E;
-      flex: 1;
-      line-height: 1.4;
-      min-width: 0;
-      word-break: break-word;
-    }
-
-    .synonym-actions {
-      display: flex;
-      gap: 4px;
-      margin-left: 8px;
-      flex-shrink: 0;
-    }
-
-    .rephrase-option .synonym-actions {
-      margin-left: 0;
-    }
-
-    .synonym-btn {
-      padding: 4px 8px;
-      font-size: 10px;
       font-weight: 600;
       font-family: inherit;
-      border-radius: 6px;
-      border: 1px solid rgba(200, 200, 200, 0.4);
       cursor: pointer;
-      transition: all 0.2s ease;
-      background: rgba(255, 255, 255, 0.9);
-      color: #6B5B8C;
+      transition: all 0.2s;
       white-space: nowrap;
-      min-width: 36px;
-      text-align: center;
     }
 
-    .synonym-btn:hover {
+    .email-save-btn:hover {
       transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(255,188,127,0.3);
     }
 
-    .synonym-copy:hover {
-      background: linear-gradient(135deg, #E8B5E8, #D4A5F5);
-      color: white;
-      border-color: transparent;
-    }
-
-    .synonym-inject {
-      background: linear-gradient(135deg, rgba(134,239,172,0.15), rgba(52,211,153,0.15));
-      border-color: rgba(52,211,153,0.35);
-      color: #059669;
-    }
-
-    .synonym-inject:hover {
-      background: linear-gradient(135deg, #34d399, #10b981);
-      color: white;
-      border-color: transparent;
-    }
-
-    /* Grammar - Changes List */
-    .changes-list {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-
-    .change-item {
-      padding: 6px 10px;
-      background: rgba(255, 188, 127, 0.1);
-      border-radius: 6px;
-      font-size: 11px;
-      color: #6B5B8C;
-      line-height: 1.4;
-      border-left: 2px solid rgba(255, 188, 127, 0.5);
-    }
-
-    /* Shorter - Word Count Badge */
-    .word-count-badge {
-      display: inline-block;
-      padding: 3px 10px;
-      background: linear-gradient(135deg, rgba(232, 181, 232, 0.2), rgba(212, 165, 245, 0.2));
-      border: 1px solid rgba(212, 165, 245, 0.35);
-      border-radius: 16px;
-      font-size: 11px;
-      font-weight: 600;
-      color: #6B5B8C;
-      margin-bottom: 8px;
-    }
-
-    /* CTA text */
-    .cta-text {
-      text-align: center;
-      padding: 8px 0 0;
+    .email-cancel-btn {
+      background: none;
+      border: 1px solid rgba(200,200,200,0.4);
+      border-radius: 8px;
+      padding: 8px 10px;
       font-size: 12px;
-      color: #9ca3af;
-      line-height: 1.5;
+      font-family: inherit;
+      color: #6b7280;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
     }
 
-    /* Toggle */
+    .email-cancel-btn:hover {
+      background: #f3f4f6;
+    }
+
+    .email-error {
+      font-size: 11px;
+      color: #dc2626;
+      margin-top: 6px;
+    }
+
+    .email-success {
+      font-size: 11px;
+      color: #059669;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+
+    /* Tools list */
+    .tool-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+    }
+
+    .tool-item + .tool-item {
+      border-top: 1px solid rgba(232,181,232,0.1);
+    }
+
+    .tool-icon {
+      font-size: 16px;
+      width: 22px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .tool-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .tool-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: #2D1B4E;
+    }
+
+    .tool-desc {
+      font-size: 11px;
+      color: #9B8FB8;
+      line-height: 1.4;
+    }
+
+    /* Footer */
+    .footer {
+      padding: 10px 20px 14px;
+      border-top: 1px solid #e5e7eb;
+      background: #fafafa;
+    }
+
+    .footer-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
     .toggle-row {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       gap: 12px;
     }
 
     .toggle-row strong {
-      display: block;
       font-size: 12px;
       color: #111827;
     }
@@ -634,14 +290,7 @@
       transform: translateX(18px);
     }
 
-    .footer-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-
-    .settings-link {
+    .feedback-link {
       font-size: 12px;
       color: #6b7280;
       text-decoration: none;
@@ -652,11 +301,11 @@
       font-family: inherit;
     }
 
-    .settings-link:hover {
+    .feedback-link:hover {
       color: #2D1B4E;
     }
 
-    /* Feedback Area */
+    /* Feedback */
     #popup-feedback-area {
       margin-top: 6px;
       text-align: center;
@@ -736,7 +385,7 @@
       color: #6b7280;
     }
 
-    /* Magic UX: Cascade Animation */
+    /* Cascade animation */
     @keyframes cascadeIn {
       from { opacity: 0; transform: translateY(10px); }
       to { opacity: 1; transform: translateY(0); }
@@ -744,125 +393,6 @@
     .cascade-item {
       animation: cascadeIn 0.3s ease-out both;
     }
-
-    /* Magic UX: Skeleton Loading */
-    @keyframes shimmer {
-      0% { background-position: -200% 0; }
-      100% { background-position: 200% 0; }
-    }
-    .popup-skeleton {
-      background: linear-gradient(90deg, rgba(232,181,232,0.1) 25%, rgba(255,213,128,0.18) 50%, rgba(232,181,232,0.1) 75%);
-      background-size: 200% 100%;
-      animation: shimmer 1.5s ease infinite;
-      border-radius: 10px;
-    }
-    .popup-skeleton-card {
-      height: 44px;
-      margin-bottom: 6px;
-    }
-    .popup-skeleton-text {
-      height: 70px;
-      margin-bottom: 8px;
-    }
-    .popup-skeleton-label {
-      height: 12px;
-      width: 100px;
-      border-radius: 6px;
-      margin-bottom: 8px;
-    }
-
-    /* Magic UX: View Transition */
-    @keyframes viewFadeIn {
-      from { opacity: 0; transform: translateY(6px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .popup-view-enter {
-      animation: viewFadeIn 0.2s ease-out;
-    }
-
-    /* Magic UX: Diff Highlight */
-    .popup-diff-highlight {
-      background: rgba(255, 188, 127, 0.25);
-      border-radius: 3px;
-      padding: 1px 2px;
-    }
-
-    /* Magic UX: Typing Cursor */
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0; }
-    }
-    .popup-typing-cursor {
-      animation: blink 0.7s step-end infinite;
-      color: #D4A5F5;
-      font-weight: 300;
-      margin-left: 1px;
-    }
-
-    /* Tone Selector */
-    .popup-tone-buttons {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-      margin-bottom: 8px;
-    }
-
-    .popup-tone-btn {
-      padding: 9px 10px;
-      background: rgba(255, 255, 255, 0.8);
-      border: 1.5px solid rgba(232, 181, 232, 0.3);
-      border-radius: 10px;
-      font-size: 13px;
-      font-weight: 600;
-      color: #2D1B4E;
-      cursor: pointer;
-      transition: all 0.2s;
-      text-align: center;
-      font-family: inherit;
-    }
-
-    .popup-tone-btn:hover {
-      background: linear-gradient(135deg, #FFD580, #FFBC7F, #FFB0C0, #E8B5E8);
-      border-color: transparent;
-      color: white;
-      transform: translateY(-1px);
-      box-shadow: 0 2px 8px rgba(255, 188, 127, 0.25);
-    }
-
-    .popup-tone-btn:active {
-      transform: translateY(0);
-    }
-
-    /* Knowledge Base */
-    .popup-kb-conversation { max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
-    .popup-kb-message { margin-bottom: 8px; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.5; word-break: break-word; }
-    .popup-kb-user { background: linear-gradient(135deg, rgba(255,213,128,0.15), rgba(232,181,232,0.15)); border: 1px solid rgba(255,188,127,0.25); color: #2D1B4E; font-weight: 500; }
-    .popup-kb-assistant { background: #f9fafb; border: 1px solid #e5e7eb; color: #374151; }
-    .popup-kb-assistant p { margin-bottom: 6px; }
-    .popup-kb-assistant p:last-child { margin-bottom: 0; }
-    .popup-kb-assistant ul, .popup-kb-assistant ol { padding-left: 18px; margin: 6px 0; }
-    .popup-kb-assistant li { margin-bottom: 3px; }
-    .popup-kb-assistant code { background: rgba(232,181,232,0.15); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
-    .popup-kb-suggestions { display: flex; flex-direction: column; gap: 6px; }
-    .popup-kb-suggestion-btn { padding: 10px 14px; background: white; border: 1px solid rgba(232,181,232,0.3); border-radius: 10px; font-size: 13px; font-weight: 500; color: #2D1B4E; cursor: pointer; text-align: left; transition: all 0.2s ease; font-family: inherit; }
-    .popup-kb-suggestion-btn:hover { border-color: rgba(255,188,127,0.5); background: #fefefe; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(255,188,127,0.15); }
-    .popup-kb-input-section { padding-top: 6px; }
-    .popup-kb-input-row { display: flex; gap: 8px; align-items: stretch; }
-    .popup-kb-input { flex: 1; padding: 8px 12px !important; margin-bottom: 0 !important; }
-    .popup-kb-ask-btn { padding: 8px 16px; background: linear-gradient(135deg, #FFD580, #FFBC7F, #FFB0C0, #E8B5E8); color: white; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer; transition: all 0.2s ease; white-space: nowrap; }
-    .popup-kb-ask-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(255,188,127,0.3); }
-    .popup-kb-ask-btn:disabled { background: linear-gradient(135deg, #E5E7EB, #D1D5DB); cursor: not-allowed; transform: none; box-shadow: none; }
-    .popup-kb-typing { display: flex; gap: 4px; padding: 4px 0; }
-    .popup-kb-typing-dot { width: 6px; height: 6px; border-radius: 50%; background: #9B8FB8; animation: popupKbBounce 1.4s ease-in-out infinite; }
-    .popup-kb-typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .popup-kb-typing-dot:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes popupKbBounce { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
-    .popup-kb-actions-row { margin-top: 6px; text-align: center; }
-    .popup-kb-new-btn { background: none; border: none; font-family: inherit; font-size: 11px; color: #9B8FB8; cursor: pointer; padding: 3px 6px; }
-    .popup-kb-new-btn:hover { color: #6B5B8C; }
-    .popup-kb-citations { margin-top: 8px; padding-top: 6px; border-top: 1px solid #e5e7eb; }
-    .popup-kb-citations-label { font-size: 10px; font-weight: 600; color: #9B8FB8; text-transform: uppercase; letter-spacing: 0.5px; display: block; margin-bottom: 3px; }
-    .popup-kb-citation { font-size: 11px; color: #6B5B8C; padding: 1px 0; }
   </style>
 </head>
 <body>
@@ -871,29 +401,59 @@
     <h1>Smart.pr Assistant</h1>
   </div>
 
-  <div id="main-content">
-    <div class="popup-loading">
-      <div class="popup-spinner"></div>
-      <span class="popup-loading-text">Detecting context...</span>
+  <div class="content">
+    <div class="section">
+      <span class="section-label">Your Email</span>
+      <div id="email-display">
+        <!-- filled by JS -->
+      </div>
+    </div>
+
+    <div class="section">
+      <span class="section-label">Tools in your sidebar</span>
+      <div class="tool-item cascade-item" style="animation-delay: 0ms">
+        <span class="tool-icon">&#9993;&#65039;</span>
+        <div class="tool-info">
+          <div class="tool-name">Subject Line Coach</div>
+          <div class="tool-desc">Feedback & alternatives for your subject</div>
+        </div>
+      </div>
+      <div class="tool-item cascade-item" style="animation-delay: 60ms">
+        <span class="tool-icon">&#9997;&#65039;</span>
+        <div class="tool-info">
+          <div class="tool-name">Paragraph Coach</div>
+          <div class="tool-desc">Grammar, rephrase, synonyms, translate, shorten</div>
+        </div>
+      </div>
+      <div class="tool-item cascade-item" style="animation-delay: 120ms">
+        <span class="tool-icon">&#128203;</span>
+        <div class="tool-info">
+          <div class="tool-name">Smart Summary</div>
+          <div class="tool-desc">Summarize your mailing in various formats</div>
+        </div>
+      </div>
+      <div class="tool-item cascade-item" style="animation-delay: 180ms">
+        <span class="tool-icon">&#128161;</span>
+        <div class="tool-info">
+          <div class="tool-name">Knowledge Base</div>
+          <div class="tool-desc">Ask anything about Smart.pr</div>
+        </div>
+      </div>
     </div>
   </div>
 
   <div class="footer">
     <div class="footer-row">
-      <div class="toggle-row" style="flex: 1;">
-        <div>
-          <strong id="extension-status">Extension is on</strong>
-        </div>
+      <div class="toggle-row">
+        <strong id="extension-status">Extension is on</strong>
         <label class="switch" aria-label="Toggle Smart.pr Assistant">
           <input type="checkbox" id="toggle-extension" checked />
           <span class="slider"></span>
         </label>
       </div>
-      <button class="settings-link" id="open-options">Settings</button>
+      <button class="feedback-link" id="popup-feedback-btn">Feedback</button>
     </div>
-    <div id="popup-feedback-area">
-      <button class="settings-link" id="popup-feedback-btn">Feedback</button>
-    </div>
+    <div id="popup-feedback-area"></div>
   </div>
 
   <script src="api-client.js"></script>

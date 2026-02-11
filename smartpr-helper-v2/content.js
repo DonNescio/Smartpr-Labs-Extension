@@ -635,8 +635,16 @@ function initDialogWatcher() {
       subjectField = field;
       if (!subjectListenersAttached) {
         subjectField.addEventListener('focus', handleSubjectFocus);
+        subjectField.addEventListener('blur', hideNudgeOnBlur);
         subjectField.addEventListener('input', handleSubjectInput);
         subjectListenersAttached = true;
+        // If field is already focused (e.g. autofocus by smart.pr), show nudge
+        // after a short delay to let the dialog finish rendering
+        setTimeout(() => {
+          if (document.activeElement === subjectField && !currentNudge) {
+            handleSubjectFocus();
+          }
+        }, 800);
       }
       lastSubjectValue = subjectField.value;
     }
@@ -749,8 +757,14 @@ function resetDetectionState() {
   if (field) {
     subjectField = field;
     subjectField.addEventListener('focus', handleSubjectFocus);
+    subjectField.addEventListener('blur', hideNudgeOnBlur);
     subjectField.addEventListener('input', handleSubjectInput);
     subjectListenersAttached = true;
+    setTimeout(() => {
+      if (document.activeElement === subjectField && !currentNudge) {
+        handleSubjectFocus();
+      }
+    }, 800);
     lastSubjectValue = subjectField.value;
   }
 }
@@ -988,12 +1002,6 @@ function showNudge(message, type) {
     hideNudge();
   });
 
-  // Auto-hide after 8 seconds
-  setTimeout(() => {
-    if (currentNudge) {
-      hideNudge();
-    }
-  }, 8000);
 }
 
 function hideNudge() {
@@ -1001,6 +1009,11 @@ function hideNudge() {
     currentNudge.remove();
     currentNudge = null;
   }
+}
+
+// Delayed hide so nudge click events can fire before blur removes the element
+function hideNudgeOnBlur() {
+  setTimeout(hideNudge, 150);
 }
 
 // ========== Floating Icon ==========
@@ -1418,6 +1431,24 @@ async function getFullMailingContent() {
     }
   }
 
+  // Overview page: extract from preview iframe (srcdoc)
+  if (!body) {
+    const previewIframe = document.querySelector('iframe[srcdoc]');
+    if (previewIframe) {
+      try {
+        const previewDoc = previewIframe.contentDocument;
+        if (previewDoc?.body) {
+          body = previewDoc.body.innerText.trim();
+          // Strip unsubscribe footer noise
+          const unsubIdx = body.search(/geen berichten|unsubscribe|afmelden/i);
+          if (unsubIdx > 0) body = body.substring(0, unsubIdx).trim();
+        }
+      } catch (e) {
+        console.warn('[Smart.pr Helper] Could not extract preview content:', e);
+      }
+    }
+  }
+
   const subject = subjectField?.value?.trim() || '';
   return { subject, body };
 }
@@ -1635,7 +1666,7 @@ async function showKBEmptyState() {
         <div class="sph-empty-text">
           <strong>I know Smart.pr inside out</strong>
           <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
-            Platform questions, PR tips, how-tos — just ask.
+            Platform questions, PR tips, how-tos - just ask.
           </p>
         </div>
       </div>
@@ -3373,15 +3404,21 @@ async function generateSubjectSuggestions(currentSubject = '', prDescription = '
         : '';
     const languageSuffix = languageInstruction ? `\n\n${languageInstruction}` : '';
 
+    // Get mailing body content for context
+    const { body: mailingBody } = await getFullMailingContent();
+    const contentContext = mailingBody
+      ? `\n\nHere is the mailing content for reference:\n"""${mailingBody.substring(0, 1500)}"""`
+      : '';
+
     if (currentSubject) {
       // Improving an existing subject
-      userPrompt = `Generate improved alternatives for this subject line:\n\n"${currentSubject}"\n\nProvide 3-5 alternatives that are more compelling.${languageSuffix}`;
+      userPrompt = `Generate improved alternatives for this subject line:\n\n"${currentSubject}"\n\nProvide 3-5 alternatives that are more compelling.${contentContext}${languageSuffix}`;
     } else if (prDescription) {
       // Generating from description
-      userPrompt = `Generate 3-5 compelling subject lines for a press release about:\n\n${prDescription}\n\nMake them professional, newsworthy, and engaging.${languageSuffix}`;
+      userPrompt = `Generate 3-5 compelling subject lines for a press release about:\n\n${prDescription}\n\nMake them professional, newsworthy, and engaging.${contentContext}${languageSuffix}`;
     } else {
       // Generic generation (fallback)
-      userPrompt = `Generate 3-5 compelling subject lines for a press release email. Make them professional, newsworthy, and engaging.${languageSuffix}`;
+      userPrompt = `Generate 3-5 compelling subject lines for a press release email. Make them professional, newsworthy, and engaging.${contentContext}${languageSuffix}`;
     }
 
     // Call proxy API via API client
@@ -3399,16 +3436,13 @@ async function generateSubjectSuggestions(currentSubject = '', prDescription = '
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     showError(errorMessage);
 
-    // Add button to open settings if email not configured
+    // Add hint to set email via popup if email not configured
     if (error.code === 'INVALID_EMAIL' || error.code === 'USER_NOT_AUTHORIZED') {
       const content = $('#sph-content');
-      const btn = document.createElement('button');
-      btn.className = 'sph-button';
-      btn.textContent = 'Open Settings';
-      btn.addEventListener('click', () => {
-        chrome.runtime.openOptionsPage();
-      });
-      content.appendChild(btn);
+      const hint = document.createElement('p');
+      hint.style.cssText = 'font-size: 12px; color: #9B8FB8; margin-top: 8px; line-height: 1.5;';
+      hint.textContent = 'Click the extension icon in your toolbar to set your email.';
+      content.appendChild(hint);
     } else {
       // Add retry button for other errors
       const currentValue = subjectField ? subjectField.value.trim() : '';
@@ -3449,10 +3483,13 @@ async function getFeedback(subject) {
   try {
     showLoadingState('Analyzing your subject line...');
 
+    // Get mailing body content for context
+    const { body: mailingBody } = await getFullMailingContent();
+    const context = { keepLanguage: true };
+    if (mailingBody) context.mailingContent = mailingBody.substring(0, 1500);
+
     // Call proxy API via API client
-    const result = await window.SmartPRAPI.getSubjectFeedback(subject, {
-      keepLanguage: true
-    });
+    const result = await window.SmartPRAPI.getSubjectFeedback(subject, context);
 
     // Display feedback
     const content = $('#sph-content');
@@ -3485,16 +3522,13 @@ async function getFeedback(subject) {
     const errorMessage = window.SmartPRAPI.getErrorMessage(error);
     showError(errorMessage);
 
-    // Add button to open settings if email not configured
+    // Add hint to set email via popup if email not configured
     if (error.code === 'INVALID_EMAIL' || error.code === 'USER_NOT_AUTHORIZED') {
       const content = $('#sph-content');
-      const btn = document.createElement('button');
-      btn.className = 'sph-button';
-      btn.textContent = 'Open Settings';
-      btn.addEventListener('click', () => {
-        chrome.runtime.openOptionsPage();
-      });
-      content.appendChild(btn);
+      const hint = document.createElement('p');
+      hint.style.cssText = 'font-size: 12px; color: #9B8FB8; margin-top: 8px; line-height: 1.5;';
+      hint.textContent = 'Click the extension icon in your toolbar to set your email.';
+      content.appendChild(hint);
     }
   }
 }
@@ -3822,6 +3856,7 @@ function detectCurrentContext() {
 function detachSubjectListeners() {
   if (subjectField && subjectListenersAttached) {
     subjectField.removeEventListener('focus', handleSubjectFocus);
+    subjectField.removeEventListener('blur', hideNudgeOnBlur);
     subjectField.removeEventListener('input', handleSubjectInput);
     subjectListenersAttached = false;
   }
