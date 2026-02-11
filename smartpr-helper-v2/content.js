@@ -3491,27 +3491,139 @@ async function getFeedback(subject) {
     // Call proxy API via API client
     const result = await window.SmartPRAPI.getSubjectFeedback(subject, context);
 
+    // Support both structured JSON and legacy string formats
+    const feedback = typeof result.feedback === 'object' ? result.feedback : null;
+    let cascadeIdx = 0;
+
+    const renderCards = (items, colorClass = '') => items.map(point => {
+      const formatted = escapeHTML(point).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      return `
+        <div class="sph-synonym-option ${colorClass} sph-cascade-item" style="animation-delay: ${cascadeIdx++ * 60}ms">
+          <span class="sph-synonym-text">${formatted}</span>
+        </div>`;
+    }).join('');
+
+    const renderAlternatives = (items) => items.map(rawAlt => {
+      const alt = rawAlt.replace(/^['"]+|['"]+$/g, '');
+      return `
+        <div class="sph-suggestion-item sph-cascade-item" style="animation-delay: ${cascadeIdx++ * 60}ms">
+          <div class="sph-suggestion-text">${escapeHTML(alt)}</div>
+          <div class="sph-suggestion-actions">
+            <button class="sph-use-button" data-text="${escapeHTML(alt)}">Use</button>
+            <button class="sph-copy-button" data-text="${escapeHTML(alt)}">Copy</button>
+          </div>
+        </div>`;
+    }).join('');
+
     // Display feedback
     const content = $('#sph-content');
-    content.innerHTML = `
-      <div class="sph-section">
-        <span class="sph-label">Your Subject</span>
-        <div class="sph-current-subject">${escapeHTML(subject)}</div>
-      </div>
-      <div class="sph-section">
-        <span class="sph-label">Feedback</span>
-        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; font-size: 14px; line-height: 1.6; color: #374151;">${renderFeedbackMarkup(result.feedback)}</div>
-      </div>
-      <div class="sph-section">
-        <button class="sph-button" id="generate-alternatives-btn">
-          Generate Better Alternatives
-        </button>
-      </div>
-    `;
 
-    $('#generate-alternatives-btn').addEventListener('click', () => {
-      generateSubjectSuggestions(subject);
-    });
+    if (feedback && (feedback.positives || feedback.improvements || feedback.alternatives)) {
+      // Structured JSON response
+      let html = `
+        <div class="sph-section">
+          <span class="sph-label">Your Subject</span>
+          <div class="sph-current-subject">${escapeHTML(subject)}</div>
+        </div>`;
+
+      if (feedback.positives?.length) {
+        html += `
+        <div class="sph-section">
+          <span class="sph-label">What works</span>
+          <div class="sph-synonym-list">${renderCards(feedback.positives, 'sph-feedback-positive')}</div>
+        </div>`;
+      }
+
+      if (feedback.improvements?.length) {
+        html += `
+        <div class="sph-section">
+          <span class="sph-label">Improvements</span>
+          <div class="sph-synonym-list">${renderCards(feedback.improvements, 'sph-feedback-improvement')}</div>
+        </div>`;
+      } else if (feedback.positives?.length) {
+        html += `
+        <div class="sph-section">
+          <div class="sph-synonym-option sph-feedback-positive sph-cascade-item" style="animation-delay: ${cascadeIdx++ * 60}ms">
+            <span class="sph-synonym-text">Nothing to improve — your subject line looks great!</span>
+          </div>
+        </div>`;
+      }
+
+      if (feedback.alternatives?.length) {
+        html += `
+        <div class="sph-section">
+          <span class="sph-label">Alternatives</span>
+          <div class="sph-suggestions">${renderAlternatives(feedback.alternatives)}</div>
+        </div>`;
+      }
+
+      content.innerHTML = html;
+
+      // Add "Use" button handlers for alternatives
+      $$('.sph-use-button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const text = btn.dataset.text;
+          if (subjectField) {
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(subjectField, text);
+            subjectField.dispatchEvent(new Event('input', { bubbles: true }));
+            subjectField.dispatchEvent(new Event('change', { bubbles: true }));
+            lastSubjectValue = text;
+            triggerSparkle(btn);
+            btn.textContent = '✓ Done';
+            btn.classList.add('copied');
+            setTimeout(() => { btn.textContent = 'Use'; btn.classList.remove('copied'); }, 2000);
+          }
+        });
+      });
+
+      // Add copy button handlers for alternatives
+      $$('.sph-copy-button').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          await copyToClipboard(btn.dataset.text);
+          triggerSparkle(btn);
+          btn.textContent = '✓ Copied';
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+        });
+      });
+
+    } else {
+      // Legacy fallback: plain text response
+      const feedbackText = typeof result.feedback === 'string' ? result.feedback : JSON.stringify(result.feedback);
+      const feedbackPoints = [];
+      for (const line of feedbackText.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (/^\d+\.\s+/.test(trimmed)) {
+          feedbackPoints.push(trimmed.replace(/^\d+\.\s+/, ''));
+        } else if (feedbackPoints.length > 0) {
+          feedbackPoints[feedbackPoints.length - 1] += ' ' + trimmed;
+        } else {
+          feedbackPoints.push(trimmed);
+        }
+      }
+
+      content.innerHTML = `
+        <div class="sph-section">
+          <span class="sph-label">Your Subject</span>
+          <div class="sph-current-subject">${escapeHTML(subject)}</div>
+        </div>
+        <div class="sph-section">
+          <span class="sph-label">Feedback</span>
+          <div class="sph-synonym-list">${renderCards(feedbackPoints)}</div>
+        </div>
+        <div class="sph-section">
+          <button class="sph-button" id="generate-alternatives-btn">
+            Generate Better Alternatives
+          </button>
+        </div>
+      `;
+
+      $('#generate-alternatives-btn').addEventListener('click', () => {
+        generateSubjectSuggestions(subject);
+      });
+    }
 
     showToast('✓ Feedback ready!');
 
