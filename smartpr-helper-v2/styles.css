@@ -181,7 +181,8 @@
   animation: gradientShift 20s ease infinite;
   animation-play-state: paused;
   backdrop-filter: blur(20px);
-  box-shadow: -4px 0 32px rgba(212, 165, 245, 0.2);
+  border-left: 1px solid rgba(212, 165, 245, 0.3);
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08), -1px 0 6px rgba(212, 165, 245, 0.25);
   z-index: 2147483647;
   transition: right 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
