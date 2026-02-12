@@ -2131,6 +2131,80 @@
     emit("open", { mode: "kb" });
   }
 
+  function buildContextInfoHTML() {
+    var user = hostContext.user;
+    var client = hostContext.client;
+    var hasUser = user && (user.email || user.name || user.id);
+    var hasClient = client && (client.name || client.id || client.plan);
+    if (!hasUser && !hasClient) return "";
+    var html =
+      '<div style="margin-top:16px;padding:14px 18px;background:linear-gradient(135deg,rgba(255,213,128,.12) 0%,rgba(232,181,232,.12) 100%);' +
+      'border:1.5px solid rgba(232,181,232,.25);border-radius:14px;font-size:13px;color:#2D1B4E;line-height:1.7">';
+    if (hasUser) {
+      html += '<div style="margin-bottom:' + (hasClient ? "10" : "0") + 'px">';
+      html +=
+        '<span style="font-size:11px;font-weight:600;color:#9B8FB8;text-transform:uppercase;letter-spacing:.5px">User</span>';
+      if (user.name)
+        html +=
+          '<div style="font-weight:600;font-size:14px">' +
+          escapeHTML(user.name) +
+          "</div>";
+      if (user.email)
+        html +=
+          '<div style="color:#6B5B8C">' + escapeHTML(user.email) + "</div>";
+      if (user.id)
+        html +=
+          '<div style="color:#6B5B8C">ID: ' + escapeHTML(user.id) + "</div>";
+      var knownUserKeys = { name: 1, email: 1, id: 1 };
+      for (var uKey in user) {
+        if (user.hasOwnProperty(uKey) && !knownUserKeys[uKey] && user[uKey]) {
+          html +=
+            '<div style="color:#6B5B8C">' +
+            escapeHTML(uKey) +
+            ": " +
+            escapeHTML(String(user[uKey])) +
+            "</div>";
+        }
+      }
+      html += "</div>";
+    }
+    if (hasClient) {
+      html += "<div>";
+      html +=
+        '<span style="font-size:11px;font-weight:600;color:#9B8FB8;text-transform:uppercase;letter-spacing:.5px">Client</span>';
+      if (client.name)
+        html +=
+          '<div style="font-weight:600;font-size:14px">' +
+          escapeHTML(client.name) +
+          "</div>";
+      if (client.id)
+        html +=
+          '<div style="color:#6B5B8C">ID: ' +
+          escapeHTML(client.id) +
+          "</div>";
+      if (client.plan)
+        html +=
+          '<div style="color:#6B5B8C">Plan: ' +
+          escapeHTML(client.plan) +
+          "</div>";
+      // Show any other client properties
+      var knownKeys = { name: 1, id: 1, plan: 1 };
+      for (var key in client) {
+        if (client.hasOwnProperty(key) && !knownKeys[key] && client[key]) {
+          html +=
+            '<div style="color:#6B5B8C">' +
+            escapeHTML(key) +
+            ": " +
+            escapeHTML(String(client[key])) +
+            "</div>";
+        }
+      }
+      html += "</div>";
+    }
+    html += "</div>";
+    return html;
+  }
+
   function showKBEmptyState() {
     setContentWithTransition(
       '<div class="smartpr-section">' +
@@ -2143,7 +2217,9 @@
         "</strong>" +
         '<p style="margin-top:8px;color:#6b7280;font-size:13px">' +
         t("kb.platformQuestions") +
-        "</p></div></div></div>" +
+        "</p></div></div>" +
+        buildContextInfoHTML() +
+        "</div>" +
         '<div class="smartpr-section smartpr-kb-input-section">' +
         '<div class="smartpr-kb-input-row">' +
         '<input type="text" id="smartpr-kb-question-input" class="smartpr-input smartpr-kb-input" placeholder="' +
