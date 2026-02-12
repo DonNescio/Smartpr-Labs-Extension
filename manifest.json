@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Smart.pr Assistant",
+  "version": "2.1.0",
+  "description": "Modern AI assistant for Smart.pr that helps you write better subject lines and content",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://*.repl.co/*",
+    "https://app.getbee.io/*",
+    "https://*.getbee.io/*"
+  ],
+  "icons": {
+    "16": "app-icon.png",
+    "48": "app-icon.png",
+    "128": "app-icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Smart.pr Assistant"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://smart.pr/*",
+        "https://*.smart.pr/*",
+        "https://svcs.smart.pr/*",
+        "https://app.getbee.io/*",
+        "https://*.getbee.io/*"
+      ],
+      "js": ["i18n.js", "api-client.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["fonts/gelica/*.otf", "logo-white.png", "logo-smart.png"],
+      "matches": [
+        "https://smart.pr/*",
+        "https://*.smart.pr/*",
+        "https://app.getbee.io/*",
+        "https://*.getbee.io/*"
+      ]
+    }
+  ]
+}

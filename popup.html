@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart.pr Assistant</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #111827;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 20px;
+      border-bottom: 1px solid #f0e8f5;
+      background: linear-gradient(135deg, rgba(255,213,128,0.1), rgba(232,181,232,0.1));
+    }
+
+    .header img {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+    }
+
+    .header h1 {
+      font-size: 17px;
+      font-weight: 600;
+    }
+
+    .content {
+      padding: 16px 20px;
+    }
+
+    .section {
+      margin-bottom: 14px;
+    }
+
+    .section:last-child {
+      margin-bottom: 0;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #9B8FB8;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 8px;
+      display: block;
+    }
+
+    /* Email display */
+    .email-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 14px;
+      background: linear-gradient(135deg, rgba(255,213,128,0.08), rgba(232,181,232,0.08));
+      border: 1.5px solid rgba(232,181,232,0.2);
+      border-radius: 10px;
+    }
+
+    .email-value {
+      font-size: 13px;
+      color: #2D1B4E;
+      font-weight: 500;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .email-value.empty {
+      color: #9B8FB8;
+      font-style: italic;
+      font-weight: 400;
+    }
+
+    .email-edit-btn {
+      background: none;
+      border: 1px solid rgba(232,181,232,0.3);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      color: #6B5B8C;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .email-edit-btn:hover {
+      background: rgba(232,181,232,0.15);
+      border-color: rgba(232,181,232,0.5);
+    }
+
+    /* Email edit form */
+    .email-form {
+      display: flex;
+      gap: 6px;
+    }
+
+    .email-input {
+      flex: 1;
+      padding: 8px 12px;
+      background: white;
+      border: 1.5px solid rgba(232,181,232,0.3);
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: inherit;
+      color: #2D1B4E;
+      min-width: 0;
+    }
+
+    .email-input::placeholder {
+      color: #9B8FB8;
+      opacity: 0.7;
+    }
+
+    .email-input:focus {
+      outline: none;
+      border-color: rgba(255,188,127,0.5);
+      box-shadow: 0 0 0 3px rgba(255,188,127,0.08);
+    }
+
+    .email-save-btn {
+      padding: 8px 14px;
+      background: linear-gradient(135deg, #FFD580, #FFBC7F, #E8B5E8);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .email-save-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(255,188,127,0.3);
+    }
+
+    .email-cancel-btn {
+      background: none;
+      border: 1px solid rgba(200,200,200,0.4);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-family: inherit;
+      color: #6b7280;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .email-cancel-btn:hover {
+      background: #f3f4f6;
+    }
+
+    .email-error {
+      font-size: 11px;
+      color: #dc2626;
+      margin-top: 6px;
+    }
+
+    .email-success {
+      font-size: 11px;
+      color: #059669;
+      font-weight: 600;
+      margin-top: 6px;
+    }
+
+    /* Tools list */
+    .tool-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+    }
+
+    .tool-item + .tool-item {
+      border-top: 1px solid rgba(232,181,232,0.1);
+    }
+
+    .tool-icon {
+      font-size: 16px;
+      width: 22px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .tool-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .tool-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: #2D1B4E;
+    }
+
+    .tool-desc {
+      font-size: 11px;
+      color: #9B8FB8;
+      line-height: 1.4;
+    }
+
+    /* Footer */
+    .footer {
+      padding: 10px 20px 14px;
+      border-top: 1px solid #e5e7eb;
+      background: #fafafa;
+    }
+
+    .footer-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .toggle-row strong {
+      font-size: 12px;
+      color: #111827;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #d1d5db;
+      transition: 0.2s;
+      border-radius: 999px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.2s;
+      border-radius: 999px;
+    }
+
+    .switch input:checked + .slider {
+      background-color: #10b981;
+    }
+
+    .switch input:checked + .slider:before {
+      transform: translateX(18px);
+    }
+
+    .feedback-link {
+      font-size: 12px;
+      color: #6b7280;
+      text-decoration: none;
+      cursor: pointer;
+      transition: color 0.2s;
+      background: none;
+      border: none;
+      font-family: inherit;
+    }
+
+    .feedback-link:hover {
+      color: #2D1B4E;
+    }
+
+    /* Language selector */
+    .lang-section {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+    }
+
+    .lang-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #9B8FB8;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .lang-selector {
+      display: flex;
+      gap: 0;
+      border: 1.5px solid rgba(232,181,232,0.3);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .lang-option {
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: inherit;
+      border: none;
+      background: transparent;
+      color: #6B5B8C;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .lang-option:not(:last-child) {
+      border-right: 1.5px solid rgba(232,181,232,0.3);
+    }
+
+    .lang-option.active {
+      background: linear-gradient(135deg, #FFD580, #FFBC7F, #E8B5E8);
+      color: white;
+    }
+
+    .lang-option:not(.active):hover {
+      background: rgba(232,181,232,0.1);
+    }
+
+    /* Feedback */
+    #popup-feedback-area {
+      margin-top: 6px;
+      text-align: center;
+    }
+
+    .popup-feedback-form {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .popup-feedback-textarea {
+      width: 100%;
+      padding: 8px 10px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1.5px solid rgba(232, 181, 232, 0.3);
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: inherit;
+      color: #2D1B4E;
+      resize: vertical;
+      min-height: 40px;
+      box-sizing: border-box;
+    }
+
+    .popup-feedback-textarea::placeholder {
+      color: #9ca3af;
+    }
+
+    .popup-feedback-textarea:focus {
+      outline: none;
+      border-color: rgba(255, 188, 127, 0.5);
+      background: rgba(255, 255, 255, 0.9);
+    }
+
+    .popup-feedback-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .popup-feedback-send {
+      padding: 4px 12px;
+      background: linear-gradient(135deg, #FFD580, #FFBC7F, #E8B5E8);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .popup-feedback-send:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 6px rgba(255, 188, 127, 0.3);
+    }
+
+    .popup-feedback-send:disabled {
+      opacity: 0.6;
+      cursor: default;
+      transform: none;
+    }
+
+    .popup-feedback-cancel {
+      background: none;
+      border: none;
+      font-family: inherit;
+      font-size: 11px;
+      color: #9ca3af;
+      cursor: pointer;
+      padding: 2px 6px;
+    }
+
+    .popup-feedback-cancel:hover {
+      color: #6b7280;
+    }
+
+    /* Cascade animation */
+    @keyframes cascadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .cascade-item {
+      animation: cascadeIn 0.3s ease-out both;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="app-icon.png" alt="Smart.pr Assistant">
+    <h1 id="popup-title">Smart.pr Assistant</h1>
+  </div>
+
+  <div class="content">
+    <div class="section">
+      <span class="section-label" id="label-email">Your Email</span>
+      <div id="email-display">
+        <!-- filled by JS -->
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="lang-section">
+        <span class="lang-label" id="label-lang">Language</span>
+        <div class="lang-selector" id="lang-selector">
+          <button class="lang-option active" data-lang="en">EN</button>
+          <button class="lang-option" data-lang="nl">NL</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <span class="section-label" id="label-tools">Tools in your sidebar</span>
+      <div class="tool-item cascade-item" style="animation-delay: 0ms">
+        <span class="tool-icon">&#9993;&#65039;</span>
+        <div class="tool-info">
+          <div class="tool-name" id="tool-subject">Subject Line Coach</div>
+          <div class="tool-desc" id="tool-subject-desc">Feedback & alternatives for your subject</div>
+        </div>
+      </div>
+      <div class="tool-item cascade-item" style="animation-delay: 60ms">
+        <span class="tool-icon">&#9997;&#65039;</span>
+        <div class="tool-info">
+          <div class="tool-name" id="tool-paragraph">Paragraph Coach</div>
+          <div class="tool-desc" id="tool-paragraph-desc">Grammar, rephrase, synonyms, translate, shorten</div>
+        </div>
+      </div>
+      <div class="tool-item cascade-item" style="animation-delay: 120ms">
+        <span class="tool-icon">&#128203;</span>
+        <div class="tool-info">
+          <div class="tool-name" id="tool-summary">Smart Summary</div>
+          <div class="tool-desc" id="tool-summary-desc">Summarize your mailing in various formats</div>
+        </div>
+      </div>
+      <div class="tool-item cascade-item" style="animation-delay: 180ms">
+        <span class="tool-icon">&#128161;</span>
+        <div class="tool-info">
+          <div class="tool-name" id="tool-kb">Knowledge Base</div>
+          <div class="tool-desc" id="tool-kb-desc">Ask anything about Smart.pr</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <div class="footer-row">
+      <div class="toggle-row">
+        <strong id="extension-status">Extension is on</strong>
+        <label class="switch" aria-label="Toggle Smart.pr Assistant">
+          <input type="checkbox" id="toggle-extension" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <button class="feedback-link" id="popup-feedback-btn">Feedback</button>
+    </div>
+    <div id="popup-feedback-area"></div>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="api-client.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,4192 @@
+/* Smart.pr Helper - Content Script (V2 React App) */
+
+// ========== Frame Context Detection ==========
+const isBeePluginFrame = window.location.hostname.includes('getbee.io');
+const isTopFrame = window === window.top;
+
+// ========== Utilities ==========
+// Get the top-level document (sidebar lives there, not in iframes)
+// In BeePlugin frame, falls back to current document (cross-origin)
+const getTopDocument = () => {
+  try {
+    return window.top.document;
+  } catch (e) {
+    // Cross-origin (BeePlugin iframe), fall back to current document
+    return document;
+  }
+};
+
+const $ = (sel, root = null) => (root || getTopDocument()).querySelector(sel);
+const $$ = (sel, root = null) => Array.from((root || getTopDocument()).querySelectorAll(sel));
+
+// Note: storage is defined in api-client.js which loads first
+// We can use the storage object from api-client.js
+
+const EXTENSION_DISABLED_KEY = 'smartpr_helper_disabled';
+
+// ========== State ==========
+let floatingIcon = null;
+let sidebar = null;
+let currentNudge = null;
+let subjectField = null;
+let subjectFieldObserver = null;
+let lastSubjectValue = '';
+let userEmail = '';
+let extensionDisabled = false;
+let subjectListenersAttached = false;
+let subjectWatchTimer = null;
+
+// Paragraph Coach state
+let currentSelection = null;
+let selectedText = '';
+let selectedEditor = null;
+let selectedEditorDoc = null; // The document the editor lives in (for iframe support)
+let currentSidebarMode = 'subject'; // 'subject', 'paragraph', or 'kb'
+let editorObserver = null;
+let scanThrottleTimer = null;
+let selectionUpdateTimer = null;
+let subjectFieldUpdateTimer = null;
+let iconVisibilityTimer = null;
+let paragraphIconDocs = new Set();
+
+// Undo state for text replacement
+let undoState = null; // { editor, editorDoc, originalText, selection, isInput }
+let undoToastTimer = null;
+
+// Cross-frame state (pro editor in BeePlugin iframe ↔ top frame sidebar)
+let proEditorSource = null;       // Top frame: BeePlugin window ref for postMessage
+let proEditorBlockType = 'text';  // Top frame: block type received from BeePlugin
+let proEditorContext = '';         // Top frame: editor context received from BeePlugin
+let sidebarOpenInTop = false;     // BeePlugin frame: sidebar is managed by top frame
+
+// Knowledge Base state
+let kbConversation = [];        // [{ role: 'user'|'assistant', text, citations? }]
+let kbConversationId = null;    // OpenAI conversation ID for follow-ups
+let kbBusy = false;
+
+// Progressive loading message timer
+let loadingMessageTimer = null;
+
+// i18n shorthand — i18n.js loads before content.js
+const t = (...args) => window.SmartPRI18n.t(...args);
+
+// Floating icon overlay state (keeps icons outside React's DOM tree)
+let iconOverlayContainer = null;
+let elementToIconMap = new WeakMap(); // Maps editor elements to their icon elements
+let iconPositionUpdateTimer = null;
+
+// ========== Paragraph Coach - V2 TipTap Editor Detection ==========
+// Find TipTap/ProseMirror editors in the V2 React app
+
+// Track the editor iframe and its observer
+let editorIframe = null;
+let editorIframeObserver = null;
+let dialogObserver = null;
+
+// Pro editor (BeePlugin/TinyMCE) state
+let proEditorObserver = null;
+let proStageObserver = null;
+
+function findTipTapEditors(doc = document) {
+  // Find all TipTap editor elements (ProseMirror-based)
+  let editors = Array.from(doc.querySelectorAll('.tiptap.ProseMirror[contenteditable="true"]'));
+
+  // Fallback: try without contenteditable check
+  if (editors.length === 0) {
+    editors = Array.from(doc.querySelectorAll('.tiptap.ProseMirror'));
+  }
+
+  return editors;
+}
+
+// Find heading/subheading input fields in V2
+function findHeadingInputs(doc = document) {
+  // H1 and H2 blocks use <input> elements instead of TipTap
+  const h1Inputs = Array.from(doc.querySelectorAll('.block-wrapper h1 > input'));
+  const h2Inputs = Array.from(doc.querySelectorAll('.block-wrapper h2 > input'));
+  return [...h1Inputs, ...h2Inputs];
+}
+
+// Find all editable blocks (TipTap editors, heading inputs, and TinyMCE editors)
+function findAllEditableBlocks(doc = document) {
+  const tipTapEditors = findTipTapEditors(doc).map(editor => ({
+    element: editor,
+    type: 'tiptap',
+    doc
+  }));
+
+  const headingInputs = findHeadingInputs(doc).map(input => ({
+    element: input,
+    type: 'heading',
+    doc
+  }));
+
+  const tinyMCEEditors = findTinyMCEEditors(doc).map(editor => ({
+    element: editor,
+    type: 'tiptap',
+    doc
+  }));
+
+  return [...tipTapEditors, ...headingInputs, ...tinyMCEEditors];
+}
+
+// ========== Pro Editor (BeePlugin/TinyMCE) Detection ==========
+
+// Find TinyMCE editors in the pro editor
+function findTinyMCEEditors(doc = document) {
+  return Array.from(doc.querySelectorAll('.mce-content-body[contenteditable="true"]'));
+}
+
+// Find all editable blocks in the pro editor
+function findProEditorBlocks(doc = document) {
+  const editors = findTinyMCEEditors(doc);
+  return editors.map(element => ({
+    element,
+    type: 'tiptap', // Use tiptap behavior (selection-based icon visibility) since they're contenteditable
+    doc
+  }));
+}
+
+// Get the pro editor container for a TinyMCE element
+function getProEditorContainer(editor) {
+  return editor.closest('.module-box') || editor.closest('[data-tiny-wrapper]') || editor.parentElement;
+}
+
+// Get block type from a pro editor module-box container
+function getProBlockType(container) {
+  if (!container) return 'text';
+  if (container.classList?.contains('module-box--heading')) return 'heading';
+  if (container.classList?.contains('module-box--paragraph')) return 'paragraph';
+  if (container.classList?.contains('module-box--text')) return 'paragraph';
+  return 'text';
+}
+
+// ========== Classic Editor (TipTap/ProseMirror) Detection ==========
+
+// Find the blob iframe that contains the V2 editor
+function findEditorIframe() {
+  // V2 uses blob: URLs for the editor iframe
+  const iframes = $$('iframe[src^="blob:"]');
+
+  // Also check for iframes with sandbox that might be the editor
+  if (iframes.length === 0) {
+    const sandboxedIframes = $$('iframe[sandbox*="allow-same-origin"]');
+    for (const iframe of sandboxedIframes) {
+      if (iframe.src && iframe.src.startsWith('blob:')) {
+        return iframe;
+      }
+    }
+  }
+
+  return iframes[0] || null;
+}
+
+// Get all editable blocks from inside the blob iframe
+function findEditorsInBlobIframe() {
+  const iframe = findEditorIframe();
+  if (!iframe) {
+    console.log('[Smart.pr Helper] No editor iframe found');
+    return [];
+  }
+
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc) {
+      console.log('[Smart.pr Helper] Could not access iframe document');
+      return [];
+    }
+
+    console.log('[Smart.pr Helper] Scanning iframe for editors...');
+    console.log('[Smart.pr Helper] iframe body children:', iframeDoc.body?.children?.length);
+
+    // Debug: Log what we find
+    const tipTapEditors = iframeDoc.querySelectorAll('.tiptap.ProseMirror');
+    const blockWrappers = iframeDoc.querySelectorAll('.block-wrapper');
+    console.log('[Smart.pr Helper] Found .tiptap.ProseMirror:', tipTapEditors.length);
+    console.log('[Smart.pr Helper] Found .block-wrapper:', blockWrappers.length);
+
+    const blocks = findAllEditableBlocks(iframeDoc);
+    return blocks.map(block => ({
+      element: block.element,
+      type: block.type,
+      iframeDoc,
+      iframe
+    }));
+  } catch (e) {
+    console.warn('[Smart.pr Helper] Error accessing iframe:', e);
+    return [];
+  }
+}
+
+function getEditorContainer(editor) {
+  // Pro editor: Walk up to find .module-box
+  const moduleBox = editor.closest('.module-box');
+  if (moduleBox) return moduleBox;
+
+  // Classic editor: Walk up to find .block-wrapper
+  const blockWrapper = editor.closest('.block-wrapper');
+  if (blockWrapper) return blockWrapper;
+
+  // Fallback: return direct parent
+  return editor.parentElement;
+}
+
+function getBlockType(container) {
+  if (!container) return 'text';
+
+  // Pro editor: Check module-box type classes
+  if (container.classList?.contains('module-box')) {
+    return getProBlockType(container);
+  }
+
+  // Classic editor: Check for heading/subheading inputs inside block-wrapper
+  if (container.classList?.contains('block-wrapper')) {
+    // Check for h1 with input (heading block)
+    if (container.querySelector('h1 > input')) return 'heading';
+    // Check for h2 with input (subheading block)
+    if (container.querySelector('h2 > input')) return 'subheading';
+    // Check block-label for type hint
+    const blockLabel = container.querySelector('.block-label');
+    if (blockLabel) {
+      const labelText = blockLabel.textContent?.trim().toLowerCase();
+      if (labelText === 'text' || labelText === 'paragraph') return 'paragraph';
+    }
+    // Has TipTap editor = text block
+    if (container.querySelector('.tiptap.ProseMirror')) return 'paragraph';
+  }
+
+  return 'text';
+}
+
+function getActiveEditorFromSelection(doc) {
+  const selection = doc.getSelection?.();
+  if (!selection || selection.isCollapsed) return null;
+  const selectionText = selection.toString();
+  if (!selectionText || !selectionText.trim()) return null;
+
+  const range = selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+  const node = range?.commonAncestorContainer || selection.anchorNode || selection.focusNode;
+  const element = node && node.nodeType === 1 ? node : node?.parentElement;
+  // Find TipTap editor (classic) or TinyMCE editor (pro)
+  return element?.closest('.tiptap.ProseMirror') || element?.closest('.mce-content-body') || null;
+}
+
+function setParagraphIconVisible(editor, isVisible) {
+  // Look up icon from our map (icons are in overlay, not in React's DOM)
+  const icon = elementToIconMap.get(editor);
+  if (!icon) return;
+  icon.classList.toggle('sph-visible', isVisible);
+}
+
+function clearVisibleParagraphIcons() {
+  // Only clear icons managed by document selectionchange (TipTap), not input-managed (headings)
+  paragraphIconDocs.forEach((doc) => {
+    doc.querySelectorAll('.sph-block-icon.sph-visible:not([data-input-managed])').forEach((icon) => {
+      icon.classList.remove('sph-visible');
+    });
+  });
+}
+
+function handleParagraphSelectionChange(doc) {
+  if (iconVisibilityTimer) clearTimeout(iconVisibilityTimer);
+  iconVisibilityTimer = setTimeout(() => {
+    clearVisibleParagraphIcons();
+    const editor = getActiveEditorFromSelection(doc);
+    if (editor) {
+      setParagraphIconVisible(editor, true);
+    }
+  }, 100);
+}
+
+function registerParagraphSelectionListener(doc) {
+  if (!doc || doc._sphParagraphIconSelectionHandler) return;
+  const handler = () => handleParagraphSelectionChange(doc);
+  doc.addEventListener('selectionchange', handler);
+  doc._sphParagraphIconSelectionHandler = handler;
+  paragraphIconDocs.add(doc);
+}
+
+// Create or get the overlay container for floating icons (outside React's DOM)
+function getOrCreateIconOverlay(iframeDoc) {
+  if (iconOverlayContainer && iconOverlayContainer.ownerDocument === iframeDoc) {
+    return iconOverlayContainer;
+  }
+
+  console.log('[Smart.pr Helper] Creating icon overlay container');
+
+  // Create new overlay container (use fixed positioning for reliability)
+  iconOverlayContainer = iframeDoc.createElement('div');
+  iconOverlayContainer.id = 'sph-icon-overlay';
+  iconOverlayContainer.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 9999;';
+  iframeDoc.body.appendChild(iconOverlayContainer);
+
+  // Inject styles if not already done
+  if (!iframeDoc.getElementById('sph-injected-styles')) {
+    injectStylesIntoIframe(iframeDoc);
+  }
+
+  return iconOverlayContainer;
+}
+
+// Update icon position to match its target element
+function updateIconPosition(icon, element) {
+  const container = getEditorContainer(element);
+  if (!container) return;
+
+  // Use viewport-relative coordinates (for fixed positioning)
+  const rect = container.getBoundingClientRect();
+
+  // Position icon inside the block (top-right corner)
+  icon.style.top = `${rect.top + 4}px`;
+  icon.style.left = `${rect.right - 40}px`; // Inside the block, 40px from right edge
+}
+
+// Update all icon positions (called on scroll/resize)
+function updateAllIconPositions() {
+  if (iconPositionUpdateTimer) return;
+  iconPositionUpdateTimer = requestAnimationFrame(() => {
+    iconPositionUpdateTimer = null;
+    if (!iconOverlayContainer) return;
+
+    const icons = iconOverlayContainer.querySelectorAll('.sph-block-icon');
+    icons.forEach(icon => {
+      const element = icon._targetElement;
+      if (element && element.isConnected) {
+        updateIconPosition(icon, element);
+      } else {
+        // Element was removed, clean up icon
+        icon.remove();
+        if (element) elementToIconMap.delete(element);
+      }
+    });
+  });
+}
+
+function addParagraphIcon(element, iframeDoc = null, elementType = 'tiptap') {
+  // Check if we already have an icon for this element
+  if (elementToIconMap.has(element)) return;
+
+  // Get the block-wrapper container
+  const container = getEditorContainer(element);
+  if (!container) return;
+
+  // Determine which document to use
+  const doc = iframeDoc || element.ownerDocument || document;
+
+  // Get or create the overlay container (OUTSIDE React's DOM)
+  const overlay = getOrCreateIconOverlay(doc);
+
+  // Create floating icon
+  const iconBtn = doc.createElement('button');
+  iconBtn.className = 'sph-block-icon';
+  iconBtn.innerHTML = `<img src="${chrome.runtime.getURL('logo-white.png')}" alt="Smart.pr" style="width:24px;height:24px;object-fit:contain;filter:drop-shadow(0 1px 2px rgba(45,27,78,0.2))" />`;
+  iconBtn.title = t('paragraph.improveWithAI');
+  iconBtn._targetElement = element; // Store reference for position updates
+
+  // Add to overlay (not to React's DOM!)
+  overlay.appendChild(iconBtn);
+
+  // Position icon next to the element
+  updateIconPosition(iconBtn, element);
+  console.log('[Smart.pr Helper] Added icon for', elementType, 'at', iconBtn.style.top, iconBtn.style.left);
+
+  // Store in our map
+  elementToIconMap.set(element, iconBtn);
+
+  // For TipTap editors, register selection listener for icon visibility
+  if (elementType === 'tiptap') {
+    registerParagraphSelectionListener(doc);
+    handleParagraphSelectionChange(doc);
+  } else {
+    // Heading icons are managed by input events, not document selectionchange
+    iconBtn.dataset.inputManaged = 'true';
+    // For heading inputs, show icon only when text is selected (like TipTap blocks)
+    const checkInputSelection = () => {
+      const hasSelection = element.selectionStart !== element.selectionEnd;
+      setParagraphIconVisible(element, hasSelection);
+    };
+    element.addEventListener('select', checkInputSelection);
+    element.addEventListener('keyup', checkInputSelection);
+    element.addEventListener('mouseup', checkInputSelection);
+    element.addEventListener('blur', () => {
+      // Delay hiding to allow click on icon
+      setTimeout(() => setParagraphIconVisible(element, false), 200);
+    });
+  }
+
+  // Click handler
+  iconBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    let text = '';
+
+    if (elementType === 'heading') {
+      // For heading inputs, get value from input
+      text = element.value?.trim() || '';
+      currentSelection = null;
+    } else {
+      // For TipTap editors, check for selection first
+      const win = iframeDoc ? iframeDoc.defaultView : window;
+      const selection = win?.getSelection();
+
+      if (selection && !selection.isCollapsed && element.contains(selection.anchorNode)) {
+        text = selection.toString().trim();
+        currentSelection = selection.getRangeAt(0).cloneRange();
+      } else {
+        // Use full editor content
+        text = element.innerText.trim();
+        currentSelection = null;
+      }
+    }
+
+    if (!text) {
+      console.log('[Smart.pr Helper] No text to improve');
+      return;
+    }
+
+    if (isBeePluginFrame) {
+      // Store editor ref locally for inject-back
+      selectedEditor = element;
+      selectedEditorDoc = iframeDoc;
+
+      // Gather block type and context for the top frame
+      const container = element.closest('.block-wrapper') || element.closest('.module-box');
+      const blockType = container ? getBlockType(container) : 'text';
+      const blocks = findAllEditableBlocks(document);
+      const contextParts = blocks.map(b =>
+        b.element.value !== undefined ? b.element.value : b.element.innerText
+      ).filter(t => t && t.trim());
+      const context = contextParts.join('\n').trim().substring(0, 500);
+
+      // Preserve visual selection highlight while sidebar has focus
+      if (currentSelection && CSS.highlights) {
+        try { CSS.highlights.set('sph-selection', new Highlight(currentSelection)); } catch (e) {}
+      }
+
+      sidebarOpenInTop = true;
+      window.top.postMessage({
+        type: 'sph:open-sidebar',
+        text: text,
+        blockType: blockType,
+        context: context
+      }, '*');
+    } else {
+      selectedText = text;
+      selectedEditor = element;
+      selectedEditorDoc = iframeDoc; // Store reference for later
+      openParagraphCoachSidebar();
+    }
+  });
+}
+
+// Inject minimal styles into iframe for the floating icons
+function injectStylesIntoIframe(iframeDoc) {
+  const style = iframeDoc.createElement('style');
+  style.id = 'sph-injected-styles';
+  style.textContent = `
+    #sph-icon-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 9999;
+    }
+    .sph-block-icon {
+      position: absolute;
+      width: 32px;
+      height: 32px;
+      border: none;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #FFD580 0%, #FFBC7F 50%, #E8B5E8 100%);
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 8px rgba(212, 165, 245, 0.3);
+    }
+    .sph-block-icon.sph-visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .sph-block-icon:hover {
+      transform: scale(1.1);
+      box-shadow: 0 4px 12px rgba(212, 165, 245, 0.5);
+    }
+    ::highlight(sph-selection) {
+      background-color: rgba(0, 120, 215, 0.3);
+    }
+  `;
+  iframeDoc.head.appendChild(style);
+
+  // Add scroll listener to update icon positions (guard against duplicates)
+  const iframeWin = iframeDoc.defaultView;
+  if (iframeWin && !iframeWin._sphListenersAttached) {
+    iframeWin.addEventListener('scroll', updateAllIconPositions, { passive: true });
+    iframeWin.addEventListener('resize', updateAllIconPositions, { passive: true });
+    iframeWin._sphListenersAttached = true;
+  }
+}
+
+function scanAndAddIcons() {
+  let count = 0;
+
+  if (isBeePluginFrame) {
+    // Pro editor: Scan TinyMCE editors in the current document
+    const proBlocks = findProEditorBlocks(document);
+    proBlocks.forEach(({ element, type }) => {
+      addParagraphIcon(element, null, type);
+    });
+    count = proBlocks.length;
+  } else {
+    // Classic editor: Scan all editable blocks inside the blob iframe
+    const iframeBlocks = findEditorsInBlobIframe();
+    iframeBlocks.forEach(({ element, type, iframeDoc }) => {
+      addParagraphIcon(element, iframeDoc, type);
+    });
+    count = iframeBlocks.length;
+  }
+
+  return count;
+}
+
+// Watch the blob iframe for content changes
+function watchEditorIframe(iframe) {
+  if (editorIframe === iframe && editorIframeObserver) return; // Already watching
+
+  // Clean up previous observer
+  if (editorIframeObserver) {
+    editorIframeObserver.disconnect();
+    editorIframeObserver = null;
+  }
+
+  editorIframe = iframe;
+
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!iframeDoc || !iframeDoc.body) {
+      // Not ready yet, wait for load
+      console.log('[Smart.pr Helper] Iframe not ready, waiting for load...');
+      iframe.addEventListener('load', () => watchEditorIframe(iframe), { once: true });
+      return;
+    }
+
+    console.log('[Smart.pr Helper] Watching editor iframe for changes');
+
+    // Wait a moment for React to render content, then do initial scan
+    setTimeout(() => {
+      const count = scanAndAddIcons();
+      console.log(`[Smart.pr Helper] Initial scan found ${count} editors`);
+
+      // If no editors found, try again after a delay (React might still be rendering)
+      if (count === 0) {
+        setTimeout(() => {
+          const retryCount = scanAndAddIcons();
+          console.log(`[Smart.pr Helper] Retry scan found ${retryCount} editors`);
+        }, 500);
+      }
+    }, 200);
+
+    // Watch for new blocks being added inside the iframe
+    editorIframeObserver = new MutationObserver(() => {
+      if (scanThrottleTimer) return;
+      scanThrottleTimer = setTimeout(() => {
+        scanThrottleTimer = null;
+        scanAndAddIcons();
+        updateAllIconPositions(); // Update positions when DOM changes
+      }, 300);
+    });
+
+    editorIframeObserver.observe(iframeDoc.body, {
+      childList: true,
+      subtree: true
+    });
+
+    // Also register selection listener in the iframe
+    registerParagraphSelectionListener(iframeDoc);
+
+  } catch (e) {
+    console.warn('[Smart.pr Helper] Could not access iframe:', e);
+  }
+}
+
+// Watch for the mailing dialog and editor iframe to appear
+function initDialogWatcher() {
+  if (dialogObserver) return; // Already watching
+
+  console.log('[Smart.pr Helper] Starting dialog watcher');
+
+  const checkForEditorIframe = () => {
+    const iframe = findEditorIframe();
+    if (iframe && iframe !== editorIframe) {
+      console.log('[Smart.pr Helper] Editor iframe detected');
+      watchEditorIframe(iframe);
+    }
+  };
+
+  const checkForSubjectField = () => {
+    const field = findSubjectField();
+    if (field && field !== subjectField) {
+      console.log('[Smart.pr Helper] Subject field detected');
+      subjectField = field;
+      if (!subjectListenersAttached) {
+        subjectField.addEventListener('focus', handleSubjectFocus);
+        subjectField.addEventListener('blur', hideNudgeOnBlur);
+        subjectField.addEventListener('input', handleSubjectInput);
+        subjectListenersAttached = true;
+        // If field is already focused (e.g. autofocus by smart.pr), show nudge
+        // after a short delay to let the dialog finish rendering
+        setTimeout(() => {
+          if (document.activeElement === subjectField && !currentNudge) {
+            handleSubjectFocus();
+          }
+        }, 800);
+      }
+      lastSubjectValue = subjectField.value;
+    }
+  };
+
+  // Initial checks
+  checkForEditorIframe();
+  checkForSubjectField();
+
+  // Watch for dialogs appearing/disappearing
+  dialogObserver = new MutationObserver((mutations) => {
+    // Check if any relevant elements were added
+    let shouldCheckIframe = false;
+    let shouldCheckSubject = false;
+
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+        // Check for iframe being added
+        if (node.tagName === 'IFRAME' || node.querySelector?.('iframe')) {
+          shouldCheckIframe = true;
+        }
+
+        // Check for dialog/form being added (contains subject field)
+        if (node.querySelector?.('input[name="subject"]') ||
+            node.matches?.('.Dialog') ||
+            node.querySelector?.('.Dialog')) {
+          shouldCheckSubject = true;
+        }
+      }
+
+      // Check for removals (dialog closed)
+      for (const node of mutation.removedNodes) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+
+        // If dialog was removed, reset state
+        if (node.matches?.('.Dialog') || node.querySelector?.('.Dialog')) {
+          console.log('[Smart.pr Helper] Dialog closed, resetting state');
+          resetDetectionState();
+        }
+      }
+    }
+
+    if (shouldCheckIframe) {
+      // Debounce iframe checks
+      setTimeout(checkForEditorIframe, 100);
+    }
+
+    if (shouldCheckSubject) {
+      // Debounce subject field checks
+      setTimeout(checkForSubjectField, 100);
+    }
+  });
+
+  dialogObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+}
+
+// Reset editor-related state when editor dialog closes
+function resetDetectionState() {
+  // Clear any pending scan throttle so it doesn't fire on stale DOM
+  if (scanThrottleTimer) {
+    clearTimeout(scanThrottleTimer);
+    scanThrottleTimer = null;
+  }
+
+  // Clean up editor iframe watching (classic editor)
+  if (editorIframeObserver) {
+    editorIframeObserver.disconnect();
+    editorIframeObserver = null;
+  }
+  editorIframe = null;
+
+  // Clean up pro editor watching
+  if (proStageObserver) {
+    proStageObserver.disconnect();
+    proStageObserver = null;
+  }
+  if (proEditorObserver) {
+    proEditorObserver.disconnect();
+    proEditorObserver = null;
+  }
+
+  // Clean up floating icon overlay (it's safe, it's outside React's DOM)
+  if (iconOverlayContainer) {
+    iconOverlayContainer.remove();
+    iconOverlayContainer = null;
+  }
+  elementToIconMap = new WeakMap();
+
+  // Clean up paragraph coach state
+  selectedEditor = null;
+  selectedEditorDoc = null;
+  selectedText = '';
+  currentSelection = null;
+
+  // Close sidebar if it was in paragraph/editor mode (editor is gone)
+  if (currentSidebarMode === 'paragraph') {
+    closeSidebar();
+  }
+
+  // Reset listener flag — the DOM element may have been recreated by React
+  subjectListenersAttached = false;
+
+  // Re-detect subject field (it may still be in the DOM behind the closed dialog)
+  const field = findSubjectField();
+  if (field) {
+    subjectField = field;
+    subjectField.addEventListener('focus', handleSubjectFocus);
+    subjectField.addEventListener('blur', hideNudgeOnBlur);
+    subjectField.addEventListener('input', handleSubjectInput);
+    subjectListenersAttached = true;
+    setTimeout(() => {
+      if (document.activeElement === subjectField && !currentNudge) {
+        handleSubjectFocus();
+      }
+    }, 800);
+    lastSubjectValue = subjectField.value;
+  }
+}
+
+// ========== Pro Editor (BeePlugin) Initialization ==========
+
+function initProEditor() {
+  if (extensionDisabled) return;
+
+  console.log('[Smart.pr Helper] Initializing pro editor support (BeePlugin frame)');
+
+  const stage = document.querySelector('#sdk-stage');
+  if (stage) {
+    watchProEditorStage(stage);
+    return;
+  }
+
+  // Wait for #sdk-stage to appear
+  if (proStageObserver) {
+    proStageObserver.disconnect();
+  }
+  proStageObserver = new MutationObserver(() => {
+    const stage = document.querySelector('#sdk-stage');
+    if (stage) {
+      proStageObserver.disconnect();
+      proStageObserver = null;
+      watchProEditorStage(stage);
+    }
+  });
+
+  proStageObserver.observe(document.body || document.documentElement, {
+    childList: true,
+    subtree: true
+  });
+}
+
+function watchProEditorStage(stage) {
+  if (proEditorObserver) return; // Already watching
+
+  console.log('[Smart.pr Helper] Watching pro editor stage for TinyMCE editors');
+
+  // Initial scan with retry
+  setTimeout(() => {
+    const count = scanAndAddIcons();
+    console.log(`[Smart.pr Helper] Pro editor initial scan found ${count} editors`);
+
+    if (count === 0) {
+      setTimeout(() => {
+        const retryCount = scanAndAddIcons();
+        console.log(`[Smart.pr Helper] Pro editor retry scan found ${retryCount} editors`);
+      }, 500);
+    }
+  }, 200);
+
+  // Watch for new modules being added
+  proEditorObserver = new MutationObserver(() => {
+    if (scanThrottleTimer) return;
+    scanThrottleTimer = setTimeout(() => {
+      scanThrottleTimer = null;
+      scanAndAddIcons();
+      updateAllIconPositions();
+    }, 300);
+  });
+
+  proEditorObserver.observe(stage, {
+    childList: true,
+    subtree: true
+  });
+
+  // Register selection listener on the document
+  registerParagraphSelectionListener(document);
+}
+
+function teardownProEditor() {
+  if (proEditorObserver) {
+    proEditorObserver.disconnect();
+    proEditorObserver = null;
+  }
+
+  if (iconOverlayContainer) {
+    iconOverlayContainer.remove();
+    iconOverlayContainer = null;
+  }
+  elementToIconMap = new WeakMap();
+}
+
+// ========== Classic Editor Initialization ==========
+
+function initParagraphCoach() {
+  if (extensionDisabled) return;
+
+  // V2: Use dialog-aware detection instead of polling
+  initDialogWatcher();
+}
+
+function teardownParagraphCoach() {
+  // Remove the floating icon overlay (it's outside React's DOM, safe to remove)
+  if (iconOverlayContainer) {
+    iconOverlayContainer.remove();
+    iconOverlayContainer = null;
+  }
+  elementToIconMap = new WeakMap();
+
+  // V2: Clean up dialog observer
+  if (dialogObserver) {
+    dialogObserver.disconnect();
+    dialogObserver = null;
+  }
+
+  // Clean up iframe observer (classic editor)
+  if (editorIframeObserver) {
+    editorIframeObserver.disconnect();
+    editorIframeObserver = null;
+  }
+  editorIframe = null;
+
+  // Clean up pro editor observer
+  if (proEditorObserver) {
+    proEditorObserver.disconnect();
+    proEditorObserver = null;
+  }
+
+  if (editorObserver) {
+    editorObserver.disconnect();
+    editorObserver = null;
+  }
+
+  if (iconVisibilityTimer) {
+    clearTimeout(iconVisibilityTimer);
+    iconVisibilityTimer = null;
+  }
+
+  paragraphIconDocs.forEach((doc) => {
+    if (doc._sphParagraphIconSelectionHandler) {
+      doc.removeEventListener('selectionchange', doc._sphParagraphIconSelectionHandler);
+      delete doc._sphParagraphIconSelectionHandler;
+    }
+  });
+  paragraphIconDocs.clear();
+}
+
+// ========== Subject Field Detection (V2) ==========
+function findSubjectField() {
+  // V2 React app selectors - prioritized list
+  const selectors = [
+    'input[name="subject"]',                      // V2 primary selector
+    'input[placeholder="Type your subject"]',     // V2 placeholder
+    'input[placeholder*="subject" i]',            // Fallback: any subject placeholder
+    'input[placeholder*="onderwerp" i]'           // Dutch fallback
+  ];
+
+  for (const selector of selectors) {
+    const field = $(selector);
+    if (field) return field;
+  }
+
+  return null;
+}
+
+// Note: watchSubjectField is no longer used in V2
+// Subject field detection is handled by initDialogWatcher()
+function watchSubjectField() {
+  // V2: This is now handled by the dialog watcher
+  // Keeping for backwards compatibility but it just calls the dialog watcher
+  if (extensionDisabled) return;
+  initDialogWatcher();
+}
+
+function handleSubjectFocus() {
+  console.log('[Smart.pr Helper] Subject field focused');
+  if (extensionDisabled) return;
+  const currentValue = subjectField.value.trim();
+
+  // Don't show nudge if sidebar is already open
+  if (sidebar && sidebar.classList.contains('open')) {
+    return;
+  }
+
+  // Show appropriate nudge based on whether field is empty
+  if (currentValue === '') {
+    showNudge(getNudgeMessage('empty'), 'empty');
+  } else {
+    showNudge(getNudgeMessage('filled'), 'filled');
+  }
+}
+
+function handleSubjectInput() {
+  if (extensionDisabled) return;
+  const newValue = subjectField.value;
+
+  // If value changed significantly, hide any existing nudge
+  if (Math.abs(newValue.length - lastSubjectValue.length) > 5) {
+    hideNudge();
+  }
+
+  lastSubjectValue = newValue;
+}
+
+// ========== Nudge System ==========
+function showNudge(message, type) {
+  console.log('[Smart.pr Helper] showNudge called:', message, type);
+  if (extensionDisabled) return;
+  // Don't show if already showing
+  if (currentNudge) return;
+
+  // Calculate position relative to subject field
+  const rect = subjectField.getBoundingClientRect();
+
+  currentNudge = document.createElement('div');
+  currentNudge.className = 'sph-nudge';
+  currentNudge.dataset.type = type;
+  currentNudge.style.top = `${rect.bottom + window.scrollY + 12}px`;
+  currentNudge.style.left = `${rect.left + window.scrollX}px`;
+
+  currentNudge.innerHTML = `
+    <span class="sph-nudge-icon">✨</span>
+    <span class="sph-nudge-text">${message}</span>
+    <button class="sph-nudge-close">×</button>
+  `;
+
+  document.body.appendChild(currentNudge);
+
+  // Click to open sidebar
+  currentNudge.addEventListener('click', (e) => {
+    if (!e.target.classList.contains('sph-nudge-close')) {
+      openSidebar(type);
+      hideNudge();
+    }
+  });
+
+  // Close button
+  const closeBtn = currentNudge.querySelector('.sph-nudge-close');
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideNudge();
+  });
+
+}
+
+function hideNudge() {
+  if (currentNudge) {
+    currentNudge.remove();
+    currentNudge = null;
+  }
+}
+
+// Delayed hide so nudge click events can fire before blur removes the element
+function hideNudgeOnBlur() {
+  setTimeout(hideNudge, 150);
+}
+
+// ========== Floating Icon ==========
+function createFloatingIcon() {
+  if (extensionDisabled) return null;
+  floatingIcon = document.createElement('div');
+  floatingIcon.id = 'smartpr-helper-icon';
+
+  const logoUrl = chrome.runtime.getURL('logo-white.png');
+
+  floatingIcon.innerHTML = `
+    <div class="sph-icon-inner">
+      <img src="${logoUrl}" alt="Smart.pr Helper" class="sph-icon-logo" />
+    </div>
+    <div class="sph-icon-badge"></div>
+  `;
+
+  document.body.appendChild(floatingIcon);
+
+  // Click to toggle sidebar
+  floatingIcon.addEventListener('click', () => {
+    if (sidebar && sidebar.classList.contains('open')) {
+      closeSidebar();
+    } else {
+      openSidebarFromIcon();
+    }
+  });
+
+  return floatingIcon;
+}
+
+function updateFloatingIcon(isOpen) {
+  if (!floatingIcon) return;
+
+  if (isOpen) {
+    floatingIcon.classList.add('sidebar-open');
+  } else {
+    floatingIcon.classList.remove('sidebar-open');
+  }
+}
+
+function showIconBadge() {
+  if (!floatingIcon) return;
+  const badge = floatingIcon.querySelector('.sph-icon-badge');
+  if (badge) {
+    badge.classList.add('show');
+  }
+}
+
+function hideIconBadge() {
+  if (!floatingIcon) return;
+  const badge = floatingIcon.querySelector('.sph-icon-badge');
+  if (badge) {
+    badge.classList.remove('show');
+  }
+}
+
+// ========== Sidebar ==========
+function createSidebar() {
+  const topDoc = getTopDocument();
+  sidebar = topDoc.createElement('div');
+  sidebar.id = 'smartpr-helper-sidebar';
+  sidebar.innerHTML = `
+    <div class="sph-header">
+      <div class="sph-header-left">
+        <button class="sph-back" title="${t('sidebar.backToAsk')}"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8,1 3,6 8,11"/></svg></button>
+        <h2 class="sph-title">${t('sidebar.subjectLineHelper')}</h2>
+      </div>
+      <button class="sph-close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="13" y2="13"/><line x1="13" y1="1" x2="1" y2="13"/></svg></button>
+    </div>
+    <div class="sph-content" id="sph-content">
+      <!-- Content will be dynamically inserted -->
+    </div>
+    <div class="sph-footer" id="sph-footer">
+      <button class="sph-feedback-link" id="sph-feedback-btn">${t('sidebar.feedback')}</button>
+    </div>
+  `;
+
+  topDoc.body.appendChild(sidebar);
+
+  // Close button
+  const closeBtn = sidebar.querySelector('.sph-close');
+  closeBtn.addEventListener('click', closeSidebar);
+
+  // Back button — returns to Knowledge Base
+  const backBtn = sidebar.querySelector('.sph-back');
+  backBtn.addEventListener('click', () => {
+    stopSelectionTracking();
+    stopSubjectFieldTracking();
+    openKnowledgeBaseSidebar();
+  });
+
+  // Feedback button
+  initSidebarFeedback();
+
+  // Initially hide back button (KB is default home)
+  updateBackButton();
+
+  return sidebar;
+}
+
+function updateBackButton() {
+  if (!sidebar) return;
+  const backBtn = sidebar.querySelector('.sph-back');
+  if (backBtn) {
+    backBtn.style.display = currentSidebarMode === 'kb' ? 'none' : 'flex';
+  }
+}
+
+function initSidebarFeedback() {
+  const footer = sidebar.querySelector('#sph-footer');
+  const feedbackBtn = footer.querySelector('#sph-feedback-btn');
+
+  feedbackBtn.addEventListener('click', () => {
+    showSidebarFeedbackForm(footer);
+  });
+}
+
+function showSidebarFeedbackForm(footer) {
+  footer.innerHTML = `
+    <div class="sph-feedback-form">
+      <textarea class="sph-feedback-textarea" id="sph-feedback-text" rows="2" placeholder="${t('sidebar.feedbackPlaceholder')}"></textarea>
+      <div class="sph-feedback-actions">
+        <button class="sph-feedback-send" id="sph-feedback-send">${t('sidebar.send')}</button>
+        <button class="sph-feedback-cancel" id="sph-feedback-cancel">${t('sidebar.cancel')}</button>
+      </div>
+    </div>
+  `;
+
+  const textarea = footer.querySelector('#sph-feedback-text');
+  textarea.focus();
+
+  footer.querySelector('#sph-feedback-cancel').addEventListener('click', () => {
+    resetSidebarFeedback(footer);
+  });
+
+  footer.querySelector('#sph-feedback-send').addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+
+    const sendBtn = footer.querySelector('#sph-feedback-send');
+    sendBtn.textContent = t('sidebar.sending');
+    sendBtn.disabled = true;
+
+    try {
+      await window.SmartPRAPI.submitFeedback(text);
+      triggerSparkle(sendBtn);
+      showToast(t('sidebar.feedbackSent'));
+      resetSidebarFeedback(footer);
+    } catch (error) {
+      sendBtn.textContent = t('sidebar.send');
+      sendBtn.disabled = false;
+      const errorMsg = window.SmartPRAPI.getErrorMessage(error);
+      showToast(t('sidebar.feedbackFailed'));
+      console.error('[Smart.pr Helper] Feedback error:', errorMsg);
+    }
+  });
+}
+
+function resetSidebarFeedback(footer) {
+  footer.innerHTML = `
+    <button class="sph-feedback-link" id="sph-feedback-btn">${t('sidebar.feedback')}</button>
+  `;
+  footer.querySelector('#sph-feedback-btn').addEventListener('click', () => {
+    showSidebarFeedbackForm(footer);
+  });
+}
+
+function openSidebar(type) {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  currentSidebarMode = 'subject';
+  updateBackButton();
+
+  // Update sidebar title for subject line mode
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = t('sidebar.subjectLineCoach');
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  // Update content based on type
+  const currentValue = subjectField ? subjectField.value.trim() : '';
+
+  if (type === 'empty' || currentValue === '') {
+    showEmptyState();
+  } else {
+    showFilledState(currentValue);
+  }
+
+  // Start listening for subject field changes
+  startSubjectFieldTracking();
+}
+
+function openSidebarFromIcon() {
+  if (extensionDisabled) return;
+
+  // Detect context: Are we in editor mode or subject line mode?
+  const hasEditorIframe = editorIframe !== null;
+
+  if (hasEditorIframe) {
+    // We're in editor mode - check for text selection
+    try {
+      const iframeDoc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      const iframeWin = editorIframe.contentWindow;
+
+      if (iframeDoc && iframeWin) {
+        const selection = iframeWin.getSelection();
+        const hasSelection = selection && !selection.isCollapsed && selection.toString().trim();
+
+        if (hasSelection) {
+          // User has text selected - find which editor it's in
+          const anchorNode = selection.anchorNode;
+          const anchorElement = anchorNode && anchorNode.nodeType === 1
+            ? anchorNode
+            : anchorNode?.parentElement;
+
+          // Check for TipTap editor
+          let editor = anchorElement?.closest('.tiptap.ProseMirror');
+
+          // Also check for heading input (selection in input)
+          if (!editor && anchorElement?.tagName === 'INPUT') {
+            const blockWrapper = anchorElement.closest('.block-wrapper');
+            if (blockWrapper && (blockWrapper.querySelector('h1 > input') || blockWrapper.querySelector('h2 > input'))) {
+              editor = anchorElement;
+            }
+          }
+
+          if (editor) {
+            selectedText = selection.toString().trim();
+            selectedEditor = editor;
+            selectedEditorDoc = iframeDoc;
+            currentSelection = selection.getRangeAt(0).cloneRange();
+            openParagraphCoachSidebar();
+            return;
+          }
+        }
+
+        // No selection - show editor context prompt
+        openEditorContextSidebar();
+        return;
+      }
+    } catch (e) {
+      console.warn('[Smart.pr Helper] Could not access editor iframe:', e);
+    }
+  }
+
+  // Check for pro editor (BeePlugin iframe) — editors run inside it, not in a blob iframe
+  const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
+  if (beeIframes.length > 0) {
+    openEditorContextSidebar();
+    return;
+  }
+
+  // Check if subject field is actually present and connected in the DOM
+  const activeSubjectField = subjectField && subjectField.isConnected ? subjectField : findSubjectField();
+  if (activeSubjectField) {
+    subjectField = activeSubjectField;
+    const currentValue = subjectField.value.trim();
+    if (currentValue === '') {
+      openSidebar('empty');
+    } else {
+      openSidebar('filled');
+    }
+  } else {
+    // No editor and no subject field in the DOM — show feature overview
+    openOverviewSidebar();
+  }
+}
+
+function openOverviewSidebar() {
+  if (extensionDisabled) return;
+  // Overview goes straight into KB mode
+  openKnowledgeBaseSidebar();
+}
+
+function closeSidebar() {
+  if (sidebar) {
+    sidebar.classList.remove('open');
+    updateFloatingIcon(false);
+  }
+  stopSelectionTracking();
+  stopSubjectFieldTracking();
+
+  // Notify BeePlugin frame that sidebar closed
+  if (proEditorSource) {
+    try { proEditorSource.postMessage({ type: 'sph:sidebar-closed' }, '*'); } catch (e) {}
+    proEditorSource = null;
+    proEditorContext = '';
+  }
+}
+
+// ========== Paragraph Coach Sidebar ==========
+function openParagraphCoachSidebar() {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  currentSidebarMode = 'paragraph';
+  updateBackButton();
+
+  // Update sidebar title
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = t('sidebar.paragraphCoach');
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  // Show paragraph coach content
+  showParagraphCoachContent();
+
+  // Start listening for selection changes in the editor
+  startSelectionTracking();
+}
+
+// Show sidebar when in editor context but no text selected
+function openEditorContextSidebar() {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  currentSidebarMode = 'paragraph';
+  updateBackButton();
+
+  // Update sidebar title
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = t('sidebar.paragraphCoach');
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  // Show helpful prompt to select text + summarize option
+  const content = $('#sph-content');
+  content.innerHTML = `
+    <div class="sph-empty">
+      <div class="sph-empty-icon">✨</div>
+      <div class="sph-empty-text">
+        <strong>${t('paragraph.selectText')}</strong>
+        <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
+          ${t('paragraph.selectTextDesc')}
+        </p>
+      </div>
+    </div>
+    <div class="sph-section" style="margin-top: 16px;">
+      <span class="sph-label">${t('paragraph.whatYouCanDo')}</span>
+      <div class="sph-help-list" style="font-size: 13px; color: #374151; line-height: 1.6;">
+        <div style="margin-bottom: 8px;">✓ ${t('paragraph.fixGrammar')}</div>
+        <div style="margin-bottom: 8px;">🔄 ${t('paragraph.rephraseParagraph')}</div>
+        <div style="margin-bottom: 8px;">💡 ${t('paragraph.suggestSynonyms')}</div>
+        <div style="margin-bottom: 8px;">🌐 ${t('paragraph.translateLanguages')}</div>
+        <div style="margin-bottom: 8px;">📝 ${t('paragraph.makeTextShorter')}</div>
+      </div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('paragraph.orFullMailing')}</span>
+      <button class="sph-button" id="summarize-mailing-btn">
+        ${t('paragraph.summarizeMailing')}
+      </button>
+    </div>
+  `;
+
+  // Summarize button
+  const summarizeBtn = content.querySelector('#summarize-mailing-btn');
+  if (summarizeBtn) {
+    summarizeBtn.addEventListener('click', () => showSummaryFormatSelector());
+  }
+
+  // Watch for text selection while sidebar is open
+  startEditorSelectionWatcher();
+}
+
+// ========== Smart Summary ==========
+
+async function getFullMailingContent() {
+  let body = '';
+
+  // Classic editor: extract from all editable blocks in the blob iframe
+  if (editorIframe) {
+    try {
+      const doc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      if (doc) {
+        const blocks = findAllEditableBlocks(doc);
+        body = blocks.map(b =>
+          b.element.value !== undefined ? b.element.value : b.element.innerText
+        ).filter(t => t && t.trim()).join('\n').trim();
+      }
+    } catch (e) {
+      console.warn('[Smart.pr Helper] Could not extract mailing content from iframe:', e);
+    }
+  }
+
+  // Pro editor: request full content from BeePlugin iframe via postMessage
+  if (!body) {
+    const beeFrame = proEditorSource || getBeePluginWindow();
+    if (beeFrame) {
+      try {
+        body = await requestBeePluginContent(beeFrame);
+      } catch (e) {
+        console.warn('[Smart.pr Helper] Could not get content from BeePlugin:', e);
+      }
+    }
+  }
+
+  // Overview page: extract from preview iframe (srcdoc)
+  if (!body) {
+    const previewIframe = document.querySelector('iframe[srcdoc]');
+    if (previewIframe) {
+      try {
+        const previewDoc = previewIframe.contentDocument;
+        if (previewDoc?.body) {
+          body = previewDoc.body.innerText.trim();
+          // Strip unsubscribe footer noise
+          const unsubIdx = body.search(/geen berichten|unsubscribe|afmelden/i);
+          if (unsubIdx > 0) body = body.substring(0, unsubIdx).trim();
+        }
+      } catch (e) {
+        console.warn('[Smart.pr Helper] Could not extract preview content:', e);
+      }
+    }
+  }
+
+  const subject = subjectField?.value?.trim() || '';
+  return { subject, body };
+}
+
+function getBeePluginWindow() {
+  const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
+  for (const iframe of beeIframes) {
+    try {
+      if (iframe.contentWindow) return iframe.contentWindow;
+    } catch (e) {}
+  }
+  return null;
+}
+
+function requestBeePluginContent(targetWindow) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      window.removeEventListener('message', handler);
+      reject(new Error('Timeout waiting for BeePlugin content'));
+    }, 3000);
+
+    function handler(e) {
+      if (e.data?.type === 'sph:mailing-content-response') {
+        clearTimeout(timeout);
+        window.removeEventListener('message', handler);
+        resolve(e.data.body || '');
+      }
+    }
+
+    window.addEventListener('message', handler);
+    targetWindow.postMessage({ type: 'sph:get-mailing-content' }, '*');
+  });
+}
+
+function getFormatLabels() {
+  return {
+    oneliner: t('format.oneliner'),
+    pitch: t('format.pitch'),
+    executive: t('format.executive'),
+    bullets: t('format.bullets')
+  };
+}
+
+async function showSummaryFormatSelector() {
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('summary.chooseFormat')}</span>
+      <div class="sph-action-buttons">
+        <button class="sph-action-btn sph-cascade-item" id="fmt-oneliner" style="animation-delay: 0ms">
+          <span class="sph-action-icon">✏️</span>
+          <span class="sph-action-label">${t('summary.oneLiner')}</span>
+          <span class="sph-action-desc">${t('summary.oneLinerDesc')}</span>
+        </button>
+        <button class="sph-action-btn sph-cascade-item" id="fmt-pitch" style="animation-delay: 60ms">
+          <span class="sph-action-icon">💬</span>
+          <span class="sph-action-label">${t('summary.shortPitch')}</span>
+          <span class="sph-action-desc">${t('summary.shortPitchDesc')}</span>
+        </button>
+        <button class="sph-action-btn sph-cascade-item" id="fmt-executive" style="animation-delay: 120ms">
+          <span class="sph-action-icon">📋</span>
+          <span class="sph-action-label">${t('summary.executiveSummary')}</span>
+          <span class="sph-action-desc">${t('summary.executiveSummaryDesc')}</span>
+        </button>
+        <button class="sph-action-btn sph-cascade-item" id="fmt-bullets" style="animation-delay: 180ms">
+          <span class="sph-action-icon">📌</span>
+          <span class="sph-action-label">${t('summary.bulletPoints')}</span>
+          <span class="sph-action-desc">${t('summary.bulletPointsDesc')}</span>
+        </button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button sph-button-secondary" id="summary-back-btn">
+        ${t('summary.back')}
+      </button>
+    </div>
+  `);
+
+  $('#fmt-oneliner').addEventListener('click', () => handleSummarize('oneliner'));
+  $('#fmt-pitch').addEventListener('click', () => handleSummarize('pitch'));
+  $('#fmt-executive').addEventListener('click', () => handleSummarize('executive'));
+  $('#fmt-bullets').addEventListener('click', () => handleSummarize('bullets'));
+  $('#summary-back-btn').addEventListener('click', () => {
+    if (selectedText) {
+      showParagraphCoachContent();
+    } else {
+      openEditorContextSidebar();
+    }
+  });
+}
+
+async function handleSummarize(format) {
+  if (extensionDisabled) return;
+
+  const { subject, body } = await getFullMailingContent();
+
+  if (!body) {
+    showError(t('summary.noContent'));
+    return;
+  }
+
+  try {
+    showLoadingState(t('loading.readingMailing'), 'summarize');
+
+    const result = await window.SmartPRAPI.summarizeMailing(subject, body, format);
+
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+
+    showSummaryResult(result.summary, format);
+    showToast(t('toast.done'));
+
+  } catch (error) {
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+    console.error('[Smart.pr Helper] Summarize error:', error);
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showSummaryError(errorMessage, format);
+  }
+}
+
+async function showSummaryResult(summary, format) {
+  const formatLabel = getFormatLabels()[format] || t('format.summary');
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${escapeHTML(formatLabel)}</span>
+      <div class="sph-result-text" id="summary-result-text"></div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="copy-summary-btn" disabled>
+        ${t('result.copyToClipboard')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="another-format-btn">
+        ${t('summary.tryAnotherFormat')}
+      </button>
+    </div>
+  `);
+
+  const resultEl = $('#summary-result-text');
+  const copyBtn = $('#copy-summary-btn');
+
+  typewriterEffect(resultEl, summary).then(() => {
+    copyBtn.disabled = false;
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    await copyToClipboard(summary);
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = t('result.copied');
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = t('result.copyToClipboard');
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  });
+
+  $('#another-format-btn').addEventListener('click', () => {
+    showSummaryFormatSelector();
+  });
+}
+
+function showSummaryError(message, format) {
+  const content = $('#sph-content');
+  content.innerHTML = `
+    <div class="sph-error">
+      <div class="sph-error-text">${escapeHTML(message)}</div>
+    </div>
+    <div class="sph-section" style="margin-top: 16px;">
+      <button class="sph-button" id="retry-summary-btn">
+        ${t('summary.tryAgain')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="summary-error-back-btn" style="margin-top: 10px;">
+        ${t('summary.back')}
+      </button>
+    </div>
+  `;
+
+  content.querySelector('#retry-summary-btn').addEventListener('click', () => handleSummarize(format));
+  content.querySelector('#summary-error-back-btn').addEventListener('click', () => showSummaryFormatSelector());
+}
+
+// ========== Knowledge Base Sidebar ==========
+function openKnowledgeBaseSidebar() {
+  if (extensionDisabled) return;
+  if (!sidebar) {
+    createSidebar();
+  }
+
+  currentSidebarMode = 'kb';
+  updateBackButton();
+
+  const title = sidebar.querySelector('.sph-title');
+  if (title) {
+    title.textContent = t('sidebar.askMeAnything');
+  }
+
+  sidebar.classList.add('open');
+  updateFloatingIcon(true);
+  hideIconBadge();
+
+  // Reset conversation state for fresh session
+  kbConversation = [];
+  kbConversationId = null;
+
+  showKBEmptyState();
+}
+
+async function showKBEmptyState() {
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <div class="sph-empty" style="padding: 24px;">
+        <div class="sph-empty-icon"><img src="${chrome.runtime.getURL('logo-smart.png')}" alt="Smart.pr" style="width:48px;height:48px;object-fit:contain;display:block;margin:0 auto;"></div>
+        <div class="sph-empty-text">
+          <strong>${t('kb.iKnowSmartPr')}</strong>
+          <p style="margin-top: 8px; color: #6b7280; font-size: 13px;">
+            ${t('kb.platformQuestions')}
+          </p>
+        </div>
+      </div>
+    </div>
+    <div class="sph-section sph-kb-input-section">
+      <div class="sph-kb-input-row">
+        <input type="text" id="kb-question-input" class="sph-input sph-kb-input" placeholder="${t('kb.placeholder')}">
+        <button class="sph-kb-ask-btn" id="kb-ask-btn">${t('kb.ask')}</button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('kb.tryAsking')}</span>
+      <div class="sph-kb-suggestions">
+        <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 0ms" data-q="${t('kb.scheduleMailing')}">${t('kb.scheduleMailing')}</button>
+        <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 60ms" data-q="${t('kb.goodSubjectLine')}">${t('kb.goodSubjectLine')}</button>
+        <button class="sph-kb-suggestion-btn sph-cascade-item" style="animation-delay: 120ms" data-q="${t('kb.importContacts')}">${t('kb.importContacts')}</button>
+      </div>
+    </div>
+    <div class="sph-section" style="margin-top: 8px; padding-top: 12px; border-top: 1px solid rgba(232, 181, 232, 0.15);">
+      <span class="sph-label">${t('kb.alsoAvailable')}</span>
+      <div style="font-size: 12px; color: var(--text-muted); line-height: 1.7;">
+        <div>✉️ <strong>${t('kb.subjectLineCoachHint')}</strong> — ${t('kb.subjectLineCoachAction')}</div>
+        <div>✨ <strong>${t('kb.paragraphCoachHint')}</strong> — ${t('kb.paragraphCoachAction')}</div>
+      </div>
+    </div>
+  `);
+
+  $$('.sph-kb-suggestion-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handleKBQuestion(btn.dataset.q);
+    });
+  });
+
+  const input = $('#kb-question-input');
+  const askBtn = $('#kb-ask-btn');
+
+  askBtn.addEventListener('click', () => {
+    const q = input.value.trim();
+    if (q) handleKBQuestion(q);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (q) handleKBQuestion(q);
+    }
+  });
+
+  input.focus();
+}
+
+async function handleKBQuestion(question) {
+  if (kbBusy) return;
+  kbBusy = true;
+
+  // Add user message to conversation
+  kbConversation.push({ role: 'user', text: question });
+
+  // Show loading state with conversation history
+  showKBConversation(true);
+
+  try {
+    const result = await window.SmartPRAPI.askKnowledgeBase(question, kbConversationId);
+
+    // Store conversation_id for follow-ups
+    kbConversationId = result.conversationId;
+
+    // Add assistant response to conversation
+    kbConversation.push({
+      role: 'assistant',
+      text: result.answer,
+      citations: result.citations || []
+    });
+
+    showKBConversation(false);
+
+  } catch (error) {
+    // Remove the user message that failed
+    kbConversation.pop();
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showKBConversation(false, errorMessage);
+  } finally {
+    kbBusy = false;
+  }
+}
+
+async function showKBConversation(isLoading, errorMessage) {
+  const messagesHTML = kbConversation.map((msg, i) => {
+    if (msg.role === 'user') {
+      return `
+        <div class="sph-kb-message sph-kb-user sph-cascade-item" style="animation-delay: ${i * 40}ms">
+          <div class="sph-kb-message-text">${escapeHTML(msg.text)}</div>
+        </div>
+      `;
+    } else {
+      return `
+        <div class="sph-kb-message sph-kb-assistant sph-cascade-item" style="animation-delay: ${i * 40}ms">
+          <div class="sph-kb-message-text">${renderKBMarkup(msg.text)}</div>
+        </div>
+      `;
+    }
+  }).join('');
+
+  let loadingHTML = '';
+  if (isLoading) {
+    const kbMessages = getProgressMessages().kb;
+    loadingHTML = `
+      <div class="sph-kb-message sph-kb-assistant">
+        <div class="sph-kb-typing">
+          <span class="sph-kb-typing-dot"></span>
+          <span class="sph-kb-typing-dot"></span>
+          <span class="sph-kb-typing-dot"></span>
+        </div>
+        <div class="sph-kb-loading-text">${kbMessages[0]}</div>
+      </div>
+    `;
+
+    // Clear any previous timer
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+
+    // Cycle through progressive messages
+    let msgIndex = 1;
+    loadingMessageTimer = setInterval(() => {
+      const el = getTopDocument().querySelector('.sph-kb-loading-text');
+      if (el && msgIndex < kbMessages.length) {
+        el.style.opacity = '0';
+        setTimeout(() => {
+          el.textContent = kbMessages[msgIndex];
+          el.style.opacity = '1';
+          msgIndex++;
+        }, 200);
+      }
+      if (msgIndex >= kbMessages.length) {
+        clearInterval(loadingMessageTimer);
+        loadingMessageTimer = null;
+      }
+    }, 2500);
+  } else {
+    // Clear timer when loading ends
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+  }
+
+  let errorHTML = '';
+  if (errorMessage) {
+    errorHTML = `
+      <div class="sph-error" style="margin-bottom: 12px;">
+        <div class="sph-error-text">${escapeHTML(errorMessage)}</div>
+      </div>
+    `;
+  }
+
+  await setContentWithTransition(`
+    <div class="sph-kb-conversation" id="kb-conversation">
+      ${messagesHTML}
+      ${loadingHTML}
+      ${errorHTML}
+    </div>
+    <div class="sph-section sph-kb-input-section">
+      <div class="sph-kb-input-row">
+        <input type="text" id="kb-question-input" class="sph-input sph-kb-input" placeholder="${t('kb.followUp')}" ${isLoading ? 'disabled' : ''}>
+        <button class="sph-kb-ask-btn" id="kb-ask-btn" ${isLoading ? 'disabled' : ''}>${t('kb.ask')}</button>
+      </div>
+      <div class="sph-kb-actions-row">
+        <button class="sph-kb-new-btn" id="kb-new-btn">${t('kb.newConversation')}</button>
+      </div>
+    </div>
+  `);
+
+  // Scroll conversation to bottom
+  const convoEl = $('#kb-conversation');
+  if (convoEl) {
+    convoEl.scrollTop = convoEl.scrollHeight;
+  }
+
+  const input = $('#kb-question-input');
+  const askBtn = $('#kb-ask-btn');
+  const newBtn = $('#kb-new-btn');
+
+  if (!isLoading) {
+    askBtn.addEventListener('click', () => {
+      const q = input.value.trim();
+      if (q) handleKBQuestion(q);
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const q = input.value.trim();
+        if (q) handleKBQuestion(q);
+      }
+    });
+
+    input.focus();
+  }
+
+  newBtn.addEventListener('click', () => {
+    kbConversation = [];
+    kbConversationId = null;
+    showKBEmptyState();
+  });
+}
+
+function renderKBMarkup(text) {
+  if (!text) return '';
+  const escaped = escapeHTML(text);
+  const lines = escaped.split(/\r?\n/);
+  const parts = [];
+  let inList = false;
+  let listType = null;
+
+  const closeList = () => {
+    if (!inList) return;
+    parts.push(listType === 'ul' ? '</ul>' : '</ol>');
+    inList = false;
+    listType = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+    const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+    if (bulletMatch) {
+      if (!inList || listType !== 'ul') { closeList(); parts.push('<ul>'); inList = true; listType = 'ul'; }
+      parts.push(`<li>${bulletMatch[1]}</li>`);
+      continue;
+    }
+    if (orderedMatch) {
+      if (!inList || listType !== 'ol') { closeList(); parts.push('<ol>'); inList = true; listType = 'ol'; }
+      parts.push(`<li>${orderedMatch[1]}</li>`);
+      continue;
+    }
+    closeList();
+    parts.push(`<p>${trimmed}</p>`);
+  }
+
+  closeList();
+
+  return parts.join('')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
+}
+
+function startEditorSelectionWatcher() {
+  stopSelectionTracking(); // Clear any existing
+
+  try {
+    const iframeDoc = editorIframe?.contentDocument || editorIframe?.contentWindow?.document;
+    const iframeWin = editorIframe?.contentWindow;
+    if (!iframeDoc || !iframeWin) return;
+
+    const handleSelection = () => {
+      if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+      selectionUpdateTimer = setTimeout(() => {
+        if (currentSidebarMode !== 'paragraph') return;
+        const selection = iframeWin.getSelection();
+        if (!selection || selection.isCollapsed || !selection.toString().trim()) return;
+
+        const anchorNode = selection.anchorNode;
+        const anchorElement = anchorNode && anchorNode.nodeType === 1
+          ? anchorNode : anchorNode?.parentElement;
+        const editor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
+        if (!editor) return;
+
+        selectedText = selection.toString().trim();
+        selectedEditor = editor;
+        selectedEditorDoc = iframeDoc;
+        currentSelection = selection.getRangeAt(0).cloneRange();
+        showParagraphCoachContent();
+        startSelectionTracking();
+      }, 200);
+    };
+
+    iframeDoc.addEventListener('selectionchange', handleSelection);
+    iframeDoc._sphSelectionHandler = handleSelection;
+
+    // Also watch heading inputs — they don't fire selectionchange
+    const headingInputs = findHeadingInputs(iframeDoc);
+    const headingHandler = (e) => {
+      const input = e.target;
+      if (!input.value?.trim()) return;
+      if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+      selectionUpdateTimer = setTimeout(() => {
+        if (currentSidebarMode !== 'paragraph') return;
+        selectedText = input.value.trim();
+        selectedEditor = input;
+        selectedEditorDoc = iframeDoc;
+        currentSelection = null;
+        showParagraphCoachContent();
+        startSelectionTracking();
+      }, 200);
+    };
+    headingInputs.forEach(input => {
+      input.addEventListener('focus', headingHandler);
+    });
+    iframeDoc._sphHeadingInputs = headingInputs;
+    iframeDoc._sphHeadingHandler = headingHandler;
+  } catch (e) {
+    console.warn('[Smart.pr Helper] Could not set up editor selection watcher:', e);
+  }
+}
+
+function startSelectionTracking() {
+  stopSelectionTracking(); // Clear any existing listeners
+
+  if (!selectedEditor) return;
+
+  const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+
+  const handleSelectionChange = () => {
+    // Debounce updates
+    if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = setTimeout(() => {
+      updateSelectedTextFromEditor();
+    }, 150);
+  };
+
+  // Listen for selection changes (covers TipTap/contenteditable blocks)
+  editorDoc.addEventListener('selectionchange', handleSelectionChange);
+  editorDoc._sphSelectionHandler = handleSelectionChange;
+
+  // Also watch heading inputs — they don't fire selectionchange on the document
+  const headingInputs = findHeadingInputs(editorDoc);
+  const headingHandler = (e) => {
+    const input = e.target;
+    if (input !== selectedEditor) {
+      selectedEditor = input;
+      selectedEditorDoc = editorDoc;
+    }
+    if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = setTimeout(() => {
+      updateSelectedTextFromEditor();
+    }, 150);
+  };
+
+  headingInputs.forEach(input => {
+    input.addEventListener('focus', headingHandler);
+    input.addEventListener('select', headingHandler);
+    input.addEventListener('keyup', headingHandler);
+  });
+  editorDoc._sphHeadingInputs = headingInputs;
+  editorDoc._sphHeadingHandler = headingHandler;
+}
+
+function stopSelectionTracking() {
+  if (selectionUpdateTimer) {
+    clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = null;
+  }
+
+  // Clean up selectionchange listener
+  if (selectedEditorDoc && selectedEditorDoc._sphSelectionHandler) {
+    selectedEditorDoc.removeEventListener('selectionchange', selectedEditorDoc._sphSelectionHandler);
+    delete selectedEditorDoc._sphSelectionHandler;
+  }
+
+  // Clean up heading input listeners
+  if (selectedEditorDoc && selectedEditorDoc._sphHeadingInputs && selectedEditorDoc._sphHeadingHandler) {
+    selectedEditorDoc._sphHeadingInputs.forEach(input => {
+      input.removeEventListener('focus', selectedEditorDoc._sphHeadingHandler);
+      input.removeEventListener('select', selectedEditorDoc._sphHeadingHandler);
+      input.removeEventListener('keyup', selectedEditorDoc._sphHeadingHandler);
+    });
+    delete selectedEditorDoc._sphHeadingInputs;
+    delete selectedEditorDoc._sphHeadingHandler;
+  }
+}
+
+function updateSelectedTextFromEditor() {
+  if (!selectedEditor || currentSidebarMode !== 'paragraph') return;
+
+  const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+  const editorWin = editorDoc.defaultView || window;
+  let newText = '';
+
+  // Check if focus/selection has moved to a different block
+  const activeElement = editorDoc.activeElement;
+  const selection = editorWin?.getSelection();
+  const anchorNode = selection?.anchorNode;
+  const anchorElement = anchorNode && anchorNode.nodeType === 1
+    ? anchorNode : anchorNode?.parentElement;
+
+  // Detect if we've moved into a heading input
+  const isHeadingInput = activeElement?.tagName === 'INPUT' &&
+    activeElement.closest('.block-wrapper') &&
+    (activeElement.closest('h1') || activeElement.closest('h2'));
+
+  if (isHeadingInput && activeElement !== selectedEditor) {
+    // Switched to a heading input
+    selectedEditor = activeElement;
+    selectedEditorDoc = editorDoc;
+  }
+
+  // Detect if we've moved into a different TipTap/TinyMCE block
+  const activeContentEditor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
+  if (activeContentEditor && activeContentEditor !== selectedEditor) {
+    selectedEditor = activeContentEditor;
+    selectedEditorDoc = activeContentEditor.ownerDocument || selectedEditorDoc;
+  }
+
+  // Now read text from whichever editor is current
+  const isInputElement = selectedEditor.tagName === 'INPUT';
+
+  if (isInputElement) {
+    const selStart = selectedEditor.selectionStart;
+    const selEnd = selectedEditor.selectionEnd;
+    if (selStart !== selEnd) {
+      newText = selectedEditor.value.substring(selStart, selEnd).trim();
+    } else {
+      newText = selectedEditor.value?.trim() || '';
+    }
+    currentSelection = null;
+  } else {
+    if (selection && !selection.isCollapsed && selectedEditor.contains(selection.anchorNode)) {
+      newText = selection.toString().trim();
+      currentSelection = selection.getRangeAt(0).cloneRange();
+    } else {
+      newText = selectedEditor.innerText.trim();
+      currentSelection = null;
+    }
+  }
+
+  // Only update if text changed
+  if (newText && newText !== selectedText) {
+    selectedText = newText;
+    updateSelectedTextDisplay();
+  }
+}
+
+function updateSelectedTextDisplay() {
+  // Only update if we're on the main paragraph coach view (not translate options or results)
+  const selectedTextDisplay = $('#sph-content .sph-current-subject');
+  if (!selectedTextDisplay) return;
+
+  // Check if we're in the main action view (has action buttons)
+  const actionButtons = $('#sph-content .sph-action-buttons');
+  if (!actionButtons) return;
+
+  const displayText = selectedText.length > 200
+    ? selectedText.substring(0, 200) + '...'
+    : selectedText;
+
+  selectedTextDisplay.innerHTML = escapeHTML(displayText);
+
+  // Also update the block type label when switching between blocks
+  const label = selectedTextDisplay.previousElementSibling;
+  if (label && label.classList.contains('sph-label')) {
+    const container = selectedEditor
+      ? (selectedEditor.closest('.block-wrapper') || selectedEditor.closest('.module-box'))
+      : null;
+    const blockType = container ? getBlockType(container) : (proEditorSource ? proEditorBlockType : 'text');
+    const typeLabel = blockType === 'heading' ? 'Heading' : blockType === 'subheading' ? 'Subheading' : 'Text';
+    label.textContent = `Selected ${typeLabel}`;
+  }
+}
+
+// ========== Subject Field Live Tracking ==========
+function startSubjectFieldTracking() {
+  stopSubjectFieldTracking(); // Clear any existing
+
+  if (!subjectField) return;
+
+  const handleSubjectChange = () => {
+    if (subjectFieldUpdateTimer) clearTimeout(subjectFieldUpdateTimer);
+    subjectFieldUpdateTimer = setTimeout(() => {
+      updateSubjectFieldDisplay();
+    }, 150);
+  };
+
+  subjectField.addEventListener('input', handleSubjectChange);
+  subjectField._sphChangeHandler = handleSubjectChange;
+}
+
+function stopSubjectFieldTracking() {
+  if (subjectFieldUpdateTimer) {
+    clearTimeout(subjectFieldUpdateTimer);
+    subjectFieldUpdateTimer = null;
+  }
+
+  if (subjectField && subjectField._sphChangeHandler) {
+    subjectField.removeEventListener('input', subjectField._sphChangeHandler);
+    delete subjectField._sphChangeHandler;
+  }
+}
+
+function updateSubjectFieldDisplay() {
+  if (currentSidebarMode !== 'subject') return;
+
+  const currentValue = subjectField ? subjectField.value.trim() : '';
+  const subjectDisplay = $('#sph-content .sph-current-subject');
+
+  // Check if we're in the filled state view (has feedback/alternatives buttons)
+  const feedbackBtn = $('#get-feedback-btn');
+  const altBtn = $('#generate-alternatives-btn');
+
+  if (subjectDisplay && (feedbackBtn || altBtn)) {
+    // Update the display text
+    subjectDisplay.innerHTML = escapeHTML(currentValue || '(empty)');
+
+    // Update button handlers to use new value
+    if (feedbackBtn) {
+      const newFeedbackBtn = feedbackBtn.cloneNode(true);
+      feedbackBtn.parentNode.replaceChild(newFeedbackBtn, feedbackBtn);
+      newFeedbackBtn.addEventListener('click', () => getFeedback(currentValue));
+    }
+
+    if (altBtn) {
+      const newAltBtn = altBtn.cloneNode(true);
+      altBtn.parentNode.replaceChild(newAltBtn, altBtn);
+      newAltBtn.addEventListener('click', () => generateSubjectSuggestions(currentValue));
+    }
+  }
+}
+
+async function showParagraphCoachContent() {
+  if (extensionDisabled) return;
+
+  // V2: Get block type from the editor's container, or from remote frame
+  const container = selectedEditor
+    ? (selectedEditor.closest('.block-wrapper') || selectedEditor.closest('.module-box'))
+    : null;
+  const blockType = container ? getBlockType(container) : (proEditorSource ? proEditorBlockType : 'text');
+  const typeLabel = blockType === 'heading' ? t('paragraph.selectedHeading') : blockType === 'subheading' ? t('paragraph.selectedSubheading') : t('paragraph.selectedText');
+
+  // Truncate long text for display
+  const displayText = selectedText.length > 200
+    ? selectedText.substring(0, 200) + '...'
+    : selectedText;
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${typeLabel}</span>
+      <div class="sph-current-subject">${escapeHTML(displayText)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('paragraph.whatToDo')}</span>
+      <div class="sph-action-buttons">
+        <button class="sph-action-btn" id="action-grammar">
+          <span class="sph-action-icon">✓</span>
+          <span class="sph-action-label">${t('paragraph.fixSpellingGrammar')}</span>
+        </button>
+        <button class="sph-action-btn" id="action-rephrase">
+          <span class="sph-action-icon">🔄</span>
+          <span class="sph-action-label">${t('paragraph.rephrase')}</span>
+        </button>
+        <button class="sph-action-btn" id="action-synonyms">
+          <span class="sph-action-icon">💡</span>
+          <span class="sph-action-label">${t('paragraph.synonyms')}</span>
+        </button>
+        <button class="sph-action-btn" id="action-translate">
+          <span class="sph-action-icon">🌐</span>
+          <span class="sph-action-label">${t('paragraph.translate')}</span>
+        </button>
+        <button class="sph-action-btn" id="action-shorter">
+          <span class="sph-action-icon">📝</span>
+          <span class="sph-action-label">${t('paragraph.shorter')}</span>
+        </button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('paragraph.fullMailing')}</span>
+      <button class="sph-button sph-button-secondary" id="summarize-mailing-btn">
+        ${t('paragraph.summarizeMailing')}
+      </button>
+    </div>
+  `);
+
+  // Attach event listeners
+  $('#action-grammar').addEventListener('click', () => handleParagraphAction('grammar'));
+  $('#action-rephrase').addEventListener('click', () => showToneSelector());
+  $('#action-synonyms').addEventListener('click', () => handleParagraphAction('synonyms'));
+  $('#action-translate').addEventListener('click', () => showTranslateOptions());
+  $('#action-shorter').addEventListener('click', () => handleParagraphAction('shorter'));
+  $('#summarize-mailing-btn').addEventListener('click', () => showSummaryFormatSelector());
+}
+
+async function showToneSelector() {
+  const displayText = selectedText.length > 150
+    ? selectedText.substring(0, 150) + '...'
+    : selectedText;
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('tone.selectedText')}</span>
+      <div class="sph-current-subject">${escapeHTML(displayText)}</div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button" id="rephrase-no-tone-btn">
+        ${t('tone.rephrase')}
+      </button>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('tone.orPickTone')}</span>
+      <div class="sph-tone-buttons">
+        <button class="sph-tone-btn" data-tone="formal">${t('tone.formal')}</button>
+        <button class="sph-tone-btn" data-tone="friendly">${t('tone.friendly')}</button>
+        <button class="sph-tone-btn" data-tone="persuasive">${t('tone.persuasive')}</button>
+        <button class="sph-tone-btn" data-tone="concise">${t('tone.concise')}</button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button sph-button-secondary" id="back-to-actions-btn">
+        ${t('tone.back')}
+      </button>
+    </div>
+  `);
+
+  $('#rephrase-no-tone-btn').addEventListener('click', () => {
+    handleParagraphAction('rephrase');
+  });
+
+  $$('.sph-tone-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      handleParagraphAction('rephrase', { tone: btn.dataset.tone });
+    });
+  });
+
+  $('#back-to-actions-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+async function showTranslateOptions() {
+  const displayText = selectedText.length > 150
+    ? selectedText.substring(0, 150) + '...'
+    : selectedText;
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('tone.selectedText')}</span>
+      <div class="sph-current-subject">${escapeHTML(displayText)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('translate.translateTo')}</span>
+      <div class="sph-language-buttons">
+        <button class="sph-lang-btn" data-lang="English">EN</button>
+        <button class="sph-lang-btn" data-lang="Dutch">NL</button>
+        <button class="sph-lang-btn" data-lang="German">DE</button>
+        <button class="sph-lang-btn" data-lang="French">FR</button>
+      </div>
+      <div class="sph-other-lang">
+        <input type="text" id="other-language-input" class="sph-input" placeholder="${t('translate.otherPlaceholder')}">
+        <button class="sph-button sph-button-secondary" id="translate-other-btn">${t('translate.translateBtn')}</button>
+      </div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button sph-button-secondary" id="back-to-actions-btn">
+        ${t('translate.back')}
+      </button>
+    </div>
+  `);
+
+  // Language button handlers
+  $$('.sph-lang-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const lang = btn.dataset.lang;
+      handleParagraphAction('translate', { targetLanguage: lang });
+    });
+  });
+
+  // Other language handler
+  const otherLangInput = $('#other-language-input');
+  const translateOtherHandler = () => {
+    const lang = otherLangInput.value.trim();
+    if (lang) {
+      handleParagraphAction('translate', { targetLanguage: lang });
+    }
+  };
+
+  $('#translate-other-btn').addEventListener('click', translateOtherHandler);
+
+  // Also trigger on Enter key
+  otherLangInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      translateOtherHandler();
+    }
+  });
+
+  // Back button
+  $('#back-to-actions-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+async function handleParagraphAction(action, options = {}) {
+  if (extensionDisabled) return;
+
+  const text = selectedText;
+  if (!text) {
+    showError(t('error.noTextSelected'));
+    return;
+  }
+
+  try {
+    let loadingMessage = t('loading.processing');
+    switch (action) {
+      case 'grammar':
+        loadingMessage = t('loading.checkingGrammar');
+        break;
+      case 'rephrase':
+        loadingMessage = t('loading.rephrasing');
+        break;
+      case 'synonyms':
+        loadingMessage = t('loading.findingSynonyms');
+        break;
+      case 'translate':
+        loadingMessage = `${t('loading.translatingTo')} ${options.targetLanguage}...`;
+        break;
+      case 'shorter':
+        loadingMessage = t('loading.makingShorter');
+        break;
+    }
+
+    showLoadingState(loadingMessage, action);
+
+    // Gather surrounding text as language context for the API
+    if (!options.context) {
+      if (selectedEditor) {
+        try {
+          const doc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+          const blocks = findAllEditableBlocks(doc);
+          const contextParts = blocks.map(b =>
+            b.element.value !== undefined ? b.element.value : b.element.innerText
+          ).filter(t => t && t.trim());
+          const context = contextParts.join('\n').trim();
+          if (context && context !== text) {
+            options.context = context.substring(0, 500);
+          }
+        } catch (e) { /* context is best-effort */ }
+      } else if (proEditorContext) {
+        options.context = proEditorContext;
+      }
+    }
+
+    const result = await window.SmartPRAPI.processParagraph(text, action, options);
+
+    // Stop progressive loading messages
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+
+    if (action === 'synonyms') {
+      showSynonymResult(result);
+    } else if (action === 'rephrase') {
+      showRephraseResult(result);
+    } else if (action === 'grammar') {
+      showGrammarResult(result);
+    } else if (action === 'shorter') {
+      showShorterResult(result);
+    } else {
+      showParagraphResult(result.text, action, options);
+    }
+    showToast(t('toast.done'));
+
+  } catch (error) {
+    if (loadingMessageTimer) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+    console.error('[Smart.pr Helper] Paragraph action error:', error);
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showParagraphError(errorMessage, action, options);
+  }
+}
+
+async function showParagraphResult(resultText, action, options = {}) {
+  let actionLabel = t('result.result');
+  switch (action) {
+    case 'grammar':
+      actionLabel = t('result.correctedText');
+      break;
+    case 'rephrase':
+      actionLabel = t('result.rephrasedText');
+      break;
+    case 'synonyms':
+      actionLabel = t('result.synonymSuggestions');
+      break;
+    case 'translate':
+      actionLabel = `${t('result.translatedTo')} ${options.targetLanguage}`;
+      break;
+    case 'shorter':
+      actionLabel = t('result.shortenedText');
+      break;
+  }
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('result.original')}</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${escapeHTML(actionLabel)}</span>
+      <div class="sph-result-text" id="paragraph-result-text"></div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="replace-text-btn" disabled>
+        ${t('result.replaceInEditor')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="copy-result-btn" disabled>
+        ${t('result.copyToClipboard')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        ${t('result.tryAnotherAction')}
+      </button>
+    </div>
+  `);
+
+  // Typewriter effect
+  const resultEl = $('#paragraph-result-text');
+  const replaceBtn = $('#replace-text-btn');
+  const copyBtn = $('#copy-result-btn');
+
+  typewriterEffect(resultEl, resultText).then(() => {
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
+  });
+
+  // Replace button
+  replaceBtn.addEventListener('click', () => {
+    replaceTextInEditor(resultText);
+  });
+
+  // Copy button
+  copyBtn.addEventListener('click', async () => {
+    await copyToClipboard(resultText);
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = t('result.copied');
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = t('result.copy');
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  });
+
+  // Back button
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function parseSynonymsFromText(text) {
+  const suggestions = [];
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    // Handle "original → syn1, syn2, syn3" format
+    if (line.includes('\u2192') || line.includes('->')) {
+      const arrowParts = line.split(/\u2192|->/).map(s => s.trim());
+      if (arrowParts.length >= 2) {
+        const syns = arrowParts[1].split(',').map(s => s.trim()).filter(Boolean);
+        suggestions.push(...syns);
+        continue;
+      }
+    }
+
+    // Handle numbered list "1. suggestion" or "- suggestion"
+    const listMatch = line.match(/^(?:\d+[.)]\s*|-\s*|\*\s*)(.+)/);
+    if (listMatch) {
+      suggestions.push(listMatch[1].trim());
+      continue;
+    }
+  }
+
+  // If nothing parsed, try comma separation on the whole text
+  if (suggestions.length === 0) {
+    const commaList = text.split(',').map(s => s.trim()).filter(Boolean);
+    if (commaList.length > 1) {
+      suggestions.push(...commaList);
+    }
+  }
+
+  // Last resort: return the whole text as a single suggestion
+  if (suggestions.length === 0 && text.trim()) {
+    suggestions.push(text.trim());
+  }
+
+  return suggestions;
+}
+
+async function showSynonymResult(result) {
+  const content = $('#sph-content');
+
+  // Prefer structured synonyms array from API, fall back to text parsing
+  const suggestions = result.synonyms || parseSynonymsFromText(result.text);
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  const synonymOptionsHTML = suggestions.map((syn, i) => `
+    <div class="sph-synonym-option sph-cascade-item" style="animation-delay: ${i * 60}ms">
+      <span class="sph-synonym-text">${escapeHTML(syn)}</span>
+      <div class="sph-synonym-actions">
+        <button class="sph-synonym-btn sph-synonym-copy" data-index="${i}" title="${t('result.copy')}">
+          ${t('result.copy')}
+        </button>
+        <button class="sph-synonym-btn sph-synonym-inject" data-index="${i}" title="${t('result.inject')}">
+          ${t('result.inject')}
+        </button>
+      </div>
+    </div>
+  `).join('');
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('result.original')}</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('result.synonymSuggestions')}</span>
+      <div class="sph-synonym-list">
+        ${synonymOptionsHTML}
+      </div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        ${t('result.tryAnotherAction')}
+      </button>
+    </div>
+  `);
+
+  // Attach event listeners for each synonym option
+  content.querySelectorAll('.sph-synonym-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      await copyToClipboard(suggestions[index]);
+      triggerSparkle(btn);
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = t('result.copy'); }, 2000);
+    });
+  });
+
+  content.querySelectorAll('.sph-synonym-inject').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.index);
+      triggerSparkle(btn);
+      replaceTextInEditor(suggestions[index]);
+    });
+  });
+
+  // Back button
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function parseRephraseFromText(text) {
+  const options = [];
+  const lines = text.split('\n').filter(l => l.trim());
+
+  for (const line of lines) {
+    // Handle numbered list "1. option" or "- option"
+    const listMatch = line.match(/^(?:\d+[.)]\s*|-\s*|\*\s*)(.+)/);
+    if (listMatch) {
+      options.push(listMatch[1].trim());
+      continue;
+    }
+  }
+
+  // If no list format found, treat whole text as a single option
+  if (options.length === 0 && text.trim()) {
+    options.push(text.trim());
+  }
+
+  return options;
+}
+
+async function showRephraseResult(result) {
+  const content = $('#sph-content');
+
+  const options = result.rephraseOptions || parseRephraseFromText(result.text);
+
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  const optionsHTML = options.map((opt, i) => `
+    <div class="sph-synonym-option sph-rephrase-option sph-cascade-item" style="animation-delay: ${i * 60}ms">
+      <span class="sph-synonym-text">${escapeHTML(opt)}</span>
+      <div class="sph-synonym-actions">
+        <button class="sph-synonym-btn sph-synonym-copy" data-index="${i}" title="${t('result.copy')}">
+          ${t('result.copy')}
+        </button>
+        <button class="sph-synonym-btn sph-synonym-inject" data-index="${i}" title="${t('result.inject')}">
+          ${t('result.inject')}
+        </button>
+      </div>
+    </div>
+  `).join('');
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('result.original')}</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('result.rephraseOptions')}</span>
+      <div class="sph-synonym-list">
+        ${optionsHTML}
+      </div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        ${t('result.tryAnotherAction')}
+      </button>
+    </div>
+  `);
+
+  content.querySelectorAll('.sph-synonym-copy').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const index = parseInt(btn.dataset.index);
+      await copyToClipboard(options[index]);
+      triggerSparkle(btn);
+      btn.textContent = '\u2713';
+      setTimeout(() => { btn.textContent = t('result.copy'); }, 2000);
+    });
+  });
+
+  content.querySelectorAll('.sph-synonym-inject').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.index);
+      triggerSparkle(btn);
+      replaceTextInEditor(options[index]);
+    });
+  });
+
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+async function showGrammarResult(result) {
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  // Build diff-highlighted HTML for corrected text
+  const diff = diffWords(selectedText, result.text);
+  const diffHTML = renderDiffHTML(diff);
+
+  let changesHTML = '';
+  if (result.changes && result.changes.length > 0) {
+    const items = result.changes.map((c, i) => `<li class="sph-change-item sph-cascade-item" style="animation-delay: ${i * 60}ms">${escapeHTML(c)}</li>`).join('');
+    changesHTML = `
+      <div class="sph-section">
+        <span class="sph-label">${t('result.changesMade')}</span>
+        <ul class="sph-changes-list">${items}</ul>
+      </div>
+    `;
+  }
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('result.original')}</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('result.correctedText')}</span>
+      <div class="sph-result-text" id="grammar-result-text">${diffHTML}</div>
+    </div>
+    ${changesHTML}
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="replace-text-btn" disabled>
+        ${t('result.replaceInEditor')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="copy-result-btn" disabled>
+        ${t('result.copyToClipboard')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        ${t('result.tryAnotherAction')}
+      </button>
+    </div>
+  `);
+
+  // Typewriter effect on the result text
+  const resultEl = $('#grammar-result-text');
+  const replaceBtn = $('#replace-text-btn');
+  const copyBtn = $('#copy-result-btn');
+
+  typewriterEffect(resultEl, result.text).then(() => {
+    // After typewriter completes, swap in the diff-highlighted version
+    resultEl.innerHTML = diffHTML;
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
+  });
+
+  replaceBtn.addEventListener('click', () => {
+    replaceTextInEditor(result.text);
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    await copyToClipboard(result.text);
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = t('result.copied');
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = t('result.copyToClipboard');
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  });
+
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+async function showShorterResult(result) {
+  const originalDisplay = selectedText.length > 100
+    ? selectedText.substring(0, 100) + '...'
+    : selectedText;
+
+  const originalWordCount = selectedText.trim().split(/\s+/).filter(Boolean).length;
+  const newWordCount = result.text.trim().split(/\s+/).filter(Boolean).length;
+
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('result.original')}</span>
+      <div class="sph-original-text">${escapeHTML(originalDisplay)}</div>
+    </div>
+    <div class="sph-section">
+      <span class="sph-label">${t('result.shortenedText')}</span>
+      <div class="sph-word-count-badge">${originalWordCount} \u2192 ${newWordCount} ${t('result.words')}</div>
+      <div class="sph-result-text" id="shorter-result-text"></div>
+    </div>
+    <div class="sph-section sph-result-actions">
+      <button class="sph-button" id="replace-text-btn" disabled>
+        ${t('result.replaceInEditor')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="copy-result-btn" disabled>
+        ${t('result.copyToClipboard')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="try-another-btn">
+        ${t('result.tryAnotherAction')}
+      </button>
+    </div>
+  `);
+
+  // Typewriter effect
+  const resultEl = $('#shorter-result-text');
+  const replaceBtn = $('#replace-text-btn');
+  const copyBtn = $('#copy-result-btn');
+
+  typewriterEffect(resultEl, result.text).then(() => {
+    replaceBtn.disabled = false;
+    copyBtn.disabled = false;
+  });
+
+  replaceBtn.addEventListener('click', () => {
+    replaceTextInEditor(result.text);
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    await copyToClipboard(result.text);
+    triggerSparkle(copyBtn);
+    copyBtn.textContent = t('result.copied');
+    copyBtn.classList.add('copied');
+    setTimeout(() => {
+      copyBtn.textContent = t('result.copyToClipboard');
+      copyBtn.classList.remove('copied');
+    }, 2000);
+  });
+
+  $('#try-another-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+async function showParagraphError(message, action, options) {
+  await setContentWithTransition(`
+    <div class="sph-error">
+      <div class="sph-error-text">${escapeHTML(message)}</div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button" id="retry-action-btn">
+        ${t('error.tryAgain')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="back-to-actions-btn">
+        ${t('error.back')}
+      </button>
+    </div>
+  `);
+
+  $('#retry-action-btn').addEventListener('click', () => {
+    handleParagraphAction(action, options);
+  });
+
+  $('#back-to-actions-btn').addEventListener('click', () => {
+    showParagraphCoachContent();
+  });
+}
+
+function replaceTextInEditor(newText) {
+  // Editor is in BeePlugin frame — delegate via postMessage
+  if (!selectedEditor && proEditorSource) {
+    proEditorSource.postMessage({ type: 'sph:replace-text', text: newText }, '*');
+    const replaceBtn = $('#replace-text-btn');
+    if (replaceBtn) triggerSparkle(replaceBtn);
+    undoState = { proEditor: true }; // Marker so performUndo knows to delegate
+    showUndoToast();
+    currentSelection = null;
+    selectedText = '';
+    setTimeout(() => closeSidebar(), 1000);
+    return;
+  }
+
+  if (!selectedEditor) {
+    showToast(t('toast.unableToReplace'));
+    return;
+  }
+
+  try {
+    // Check if this is a heading input (not a TipTap editor)
+    const isInputElement = selectedEditor.tagName === 'INPUT';
+
+    // Save undo state before replacing
+    undoState = {
+      editor: selectedEditor,
+      editorDoc: selectedEditorDoc || selectedEditor.ownerDocument || document,
+      originalText: isInputElement ? selectedEditor.value : selectedText,
+      newText: newText,
+      isInput: isInputElement
+    };
+
+    if (isInputElement) {
+      // For heading inputs, directly set the value
+      selectedEditor.focus();
+      selectedEditor.value = newText;
+
+      // Dispatch input event to notify React of the change
+      const inputEvent = new Event('input', { bubbles: true });
+      selectedEditor.dispatchEvent(inputEvent);
+
+      // Also dispatch change event for good measure
+      const changeEvent = new Event('change', { bubbles: true });
+      selectedEditor.dispatchEvent(changeEvent);
+    } else {
+      // For TipTap editors, use selection-based replacement
+      const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+      const editorWin = editorDoc.defaultView || window;
+
+      // Focus the editor
+      selectedEditor.focus();
+
+      if (currentSelection) {
+        // We have a saved selection range - restore it
+        const selection = editorWin.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(currentSelection);
+
+        // Use execCommand on the correct document (works with TipTap's undo stack)
+        editorDoc.execCommand('insertText', false, newText);
+      } else {
+        // No saved selection - replace entire content
+        // Select all content in the editor first
+        const selection = editorWin.getSelection();
+        const range = editorDoc.createRange();
+        range.selectNodeContents(selectedEditor);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        // Replace with new text
+        editorDoc.execCommand('insertText', false, newText);
+      }
+    }
+
+    // Sparkle from the replace button that triggered this
+    const replaceBtn = $('#replace-text-btn');
+    if (replaceBtn) triggerSparkle(replaceBtn);
+
+    // Show undo toast instead of regular toast
+    showUndoToast();
+
+    // Clear selection state
+    currentSelection = null;
+    selectedText = '';
+    selectedEditorDoc = null;
+
+    // Close sidebar after a brief delay
+    setTimeout(() => {
+      closeSidebar();
+    }, 1000);
+
+  } catch (error) {
+    console.error('[Smart.pr Helper] Replace error:', error);
+    showToast(t('toast.replaceFailed'));
+  }
+}
+
+function showUndoToast() {
+  if (extensionDisabled) return;
+  const topDoc = getTopDocument();
+
+  // Remove any existing undo toast
+  const existing = topDoc.querySelector('.sph-undo-toast');
+  if (existing) existing.remove();
+  if (undoToastTimer) clearTimeout(undoToastTimer);
+
+  const toast = topDoc.createElement('div');
+  toast.className = 'sph-toast sph-undo-toast';
+  toast.innerHTML = `
+    <span>${t('toast.textReplaced')}</span>
+    <button class="sph-undo-btn">${t('toast.undo')}</button>
+  `;
+  topDoc.body.appendChild(toast);
+
+  toast.querySelector('.sph-undo-btn').addEventListener('click', () => {
+    performUndo();
+    toast.remove();
+  });
+
+  undoToastTimer = setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 0.3s ease';
+    setTimeout(() => toast.remove(), 300);
+    undoState = null;
+  }, 5000);
+}
+
+function performUndo() {
+  if (!undoState) return;
+
+  // Editor is in BeePlugin frame — delegate via postMessage
+  if (undoState.proEditor && proEditorSource) {
+    proEditorSource.postMessage({ type: 'sph:undo-replace' }, '*');
+    undoState = null;
+    return;
+  }
+
+  const { editor, editorDoc, originalText, newText, isInput } = undoState;
+
+  try {
+    if (isInput) {
+      editor.focus();
+      editor.value = originalText;
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      const editorWin = editorDoc.defaultView || window;
+      editor.focus();
+
+      // Find the newText in the editor DOM and select it, then replace with original
+      const range = findTextRange(editor, newText, editorDoc);
+      if (range) {
+        const sel = editorWin.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        editorDoc.execCommand('insertText', false, originalText);
+      } else {
+        showToast(t('toast.couldNotUndo'));
+        undoState = null;
+        return;
+      }
+    }
+    showToast(t('toast.undone'));
+  } catch (e) {
+    console.error('[Smart.pr Helper] Undo error:', e);
+    showToast(t('toast.undoFailed'));
+  }
+  undoState = null;
+  if (undoToastTimer) clearTimeout(undoToastTimer);
+}
+
+// Walk text nodes to find a string and return a DOM Range spanning it
+function findTextRange(rootNode, searchText, doc) {
+  const walker = doc.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let fullText = '';
+
+  while (walker.nextNode()) {
+    textNodes.push({ node: walker.currentNode, offset: fullText.length });
+    fullText += walker.currentNode.textContent;
+  }
+
+  const idx = fullText.indexOf(searchText);
+  if (idx === -1) return null;
+
+  const endIdx = idx + searchText.length;
+  const range = doc.createRange();
+
+  for (const { node, offset } of textNodes) {
+    const nodeEnd = offset + node.textContent.length;
+    if (offset <= idx && idx < nodeEnd) {
+      range.setStart(node, idx - offset);
+      break;
+    }
+  }
+
+  for (const { node, offset } of textNodes) {
+    const nodeEnd = offset + node.textContent.length;
+    if (offset < endIdx && endIdx <= nodeEnd) {
+      range.setEnd(node, endIdx - offset);
+      break;
+    }
+  }
+
+  return range;
+}
+
+// ========== Subject Line Sidebar States ==========
+async function showEmptyState() {
+  if (extensionDisabled) return;
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <p class="sph-description">
+        ${t('subject.describePrompt')}
+      </p>
+      <span class="sph-label">${t('subject.describePR')}</span>
+      <textarea
+        id="pr-description-input"
+        class="sph-textarea"
+        placeholder="${t('subject.placeholder')}"
+        rows="4"
+      ></textarea>
+      <button class="sph-button" id="generate-subject-btn">
+        ${t('subject.generate')}
+      </button>
+    </div>
+    <div class="sph-empty">
+      <div class="sph-empty-icon">✨</div>
+      <div class="sph-empty-text">
+        ${t('subject.moreDetails')}
+      </div>
+    </div>
+  `);
+
+  const btn = $('#generate-subject-btn');
+  const textarea = $('#pr-description-input');
+
+  btn.addEventListener('click', () => {
+    const description = textarea.value.trim();
+    generateSubjectSuggestions('', description);
+  });
+
+  // Also trigger on Enter+Cmd/Ctrl
+  textarea.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      btn.click();
+    }
+  });
+}
+
+async function showFilledState(currentSubject) {
+  if (extensionDisabled) return;
+  await setContentWithTransition(`
+    <div class="sph-section">
+      <span class="sph-label">${t('subject.currentSubject')}</span>
+      <div class="sph-current-subject">${escapeHTML(currentSubject)}</div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button" id="get-feedback-btn">
+        ${t('subject.getFeedback')}
+      </button>
+      <button class="sph-button sph-button-secondary" id="generate-alternatives-btn">
+        ${t('subject.generateAlternatives')}
+      </button>
+    </div>
+  `);
+
+  const feedbackBtn = $('#get-feedback-btn');
+  feedbackBtn.addEventListener('click', () => getFeedback(currentSubject));
+
+  const altBtn = $('#generate-alternatives-btn');
+  altBtn.addEventListener('click', () => generateSubjectSuggestions(currentSubject));
+}
+
+function getProgressMessages() {
+  return {
+    grammar: t('progress.grammar'),
+    rephrase: t('progress.rephrase'),
+    synonyms: t('progress.synonyms'),
+    translate: t('progress.translate'),
+    shorter: t('progress.shorter'),
+    summarize: t('progress.summarize'),
+    kb: t('progress.kb'),
+    default: t('progress.default')
+  };
+}
+
+function showLoadingState(message = null, action = null) {
+  const content = $('#sph-content');
+  let skeletonHTML = '';
+
+  // Clear any previous loading message timer
+  if (loadingMessageTimer) {
+    clearInterval(loadingMessageTimer);
+    loadingMessageTimer = null;
+  }
+
+  if (action === 'synonyms' || action === 'rephrase') {
+    skeletonHTML = `
+      <div class="sph-skeleton sph-skeleton-label"></div>
+      <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 0ms"></div>
+      <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 100ms"></div>
+      <div class="sph-skeleton sph-skeleton-card sph-cascade-item" style="animation-delay: 200ms"></div>
+    `;
+  } else if (action === 'grammar' || action === 'translate' || action === 'shorter' || action === 'summarize') {
+    skeletonHTML = `
+      <div class="sph-skeleton sph-skeleton-label"></div>
+      <div class="sph-skeleton sph-skeleton-text"></div>
+    `;
+  }
+
+  const defaultMessage = message || t('loading.generating');
+
+  content.innerHTML = `
+    <div class="sph-loading">
+      ${skeletonHTML || '<div class="sph-spinner"></div>'}
+      <div class="sph-loading-text">${defaultMessage}</div>
+    </div>
+  `;
+
+  // Start cycling through progressive messages
+  const messages = getProgressMessages()[action] || getProgressMessages().default;
+  let msgIndex = 1; // Start at 1 since initial message is already shown
+  loadingMessageTimer = setInterval(() => {
+    const loadingTextEl = content.querySelector('.sph-loading-text');
+    if (loadingTextEl && msgIndex < messages.length) {
+      loadingTextEl.style.opacity = '0';
+      loadingTextEl.style.transition = 'opacity 0.2s ease';
+      setTimeout(() => {
+        loadingTextEl.textContent = messages[msgIndex];
+        loadingTextEl.style.opacity = '1';
+        msgIndex++;
+      }, 200);
+    }
+    if (msgIndex >= messages.length) {
+      clearInterval(loadingMessageTimer);
+      loadingMessageTimer = null;
+    }
+  }, 2500);
+}
+
+function showError(message) {
+  const content = $('#sph-content');
+  const existingContent = content.innerHTML;
+
+  const errorHTML = `
+    <div class="sph-error">
+      <div class="sph-error-text">${escapeHTML(message)}</div>
+    </div>
+  `;
+
+  // Prepend error to existing content
+  content.innerHTML = errorHTML + existingContent.replace(/<div class="sph-error">[\s\S]*?<\/div>/, '');
+}
+
+async function showSuggestions(suggestions, originalSubject = null) {
+  let html = '';
+
+  if (originalSubject) {
+    html += `
+      <div class="sph-section">
+        <span class="sph-label">${t('subject.originalSubject')}</span>
+        <div class="sph-current-subject">${escapeHTML(originalSubject)}</div>
+      </div>
+    `;
+  }
+
+  html += `
+    <div class="sph-section">
+      <span class="sph-label">${t('subject.suggestedLines')}</span>
+      <div class="sph-suggestions">
+        ${suggestions.map((suggestion, i) => `
+          <div class="sph-suggestion-item sph-cascade-item" style="animation-delay: ${i * 60}ms">
+            <div class="sph-suggestion-text">${escapeHTML(suggestion)}</div>
+            <div class="sph-suggestion-actions">
+              <button class="sph-use-button" data-text="${escapeHTML(suggestion)}">
+                ${t('subject.use')}
+              </button>
+              <button class="sph-copy-button" data-text="${escapeHTML(suggestion)}">
+                ${t('subject.copy')}
+              </button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    <div class="sph-section">
+      <button class="sph-button sph-button-secondary" id="generate-more-btn">
+        ${t('subject.generateMore')}
+      </button>
+    </div>
+  `;
+
+  await setContentWithTransition(html);
+
+  // Add "Use" (inject) button handlers
+  $$('.sph-use-button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const text = btn.dataset.text;
+      if (subjectField) {
+        // Set the value using React-compatible event dispatching
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(subjectField, text);
+        subjectField.dispatchEvent(new Event('input', { bubbles: true }));
+        subjectField.dispatchEvent(new Event('change', { bubbles: true }));
+        lastSubjectValue = text;
+        triggerSparkle(btn);
+        btn.textContent = t('result.done');
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = t('subject.use');
+          btn.classList.remove('copied');
+        }, 2000);
+      }
+    });
+  });
+
+  // Add copy button handlers
+  $$('.sph-copy-button').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.text;
+      await copyToClipboard(text);
+      triggerSparkle(btn);
+
+      // Visual feedback
+      const originalText = btn.textContent;
+      btn.textContent = t('result.copied');
+      btn.classList.add('copied');
+
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  });
+
+  // Generate more button
+  const generateMoreBtn = $('#generate-more-btn');
+  if (generateMoreBtn) {
+    generateMoreBtn.addEventListener('click', () => {
+      const current = originalSubject || (subjectField ? subjectField.value.trim() : '');
+      generateSubjectSuggestions(current);
+    });
+  }
+}
+
+// ========== API Client Integration ==========
+// Note: API client is loaded via api-client.js and available as window.SmartPRAPI
+
+async function getUserEmail() {
+  if (userEmail) return userEmail;
+
+  userEmail = await storage.get('smartpr_user_email', '');
+
+  if (!userEmail) {
+    throw {
+      code: 'INVALID_EMAIL',
+      message: t('apiError.enterEmail')
+    };
+  }
+
+  return userEmail;
+}
+
+// ========== Subject Line Generation ==========
+const SUBJECT_GENERATION_PROMPT = `You are an award-winning PR subject line strategist helping a Smart.pr user craft compelling email subject lines.
+
+Your task: Generate 3 to 5 compelling subject line alternatives that maximize opens without sounding spammy.
+
+Rules:
+1. Detect the dominant language (Dutch or English) from the context and write subjects in that language
+2. Keep each subject <= 70 characters and make them factual
+3. Avoid ALL CAPS, excessive punctuation, emoji, or clickbait
+4. Highlight the strongest news hook or benefit
+5. Make each suggestion distinct with different angles or approaches
+
+Return ONLY valid JSON in this exact format:
+{"subjects": ["subject 1", "subject 2", "subject 3"]}
+
+No additional text or explanation.`;
+
+async function generateSubjectSuggestions(currentSubject = '', prDescription = '') {
+  if (extensionDisabled) return;
+  try {
+    showLoadingState(t('subject.generatingSuggestions'));
+
+    let userPrompt = '';
+    const languageInstruction = currentSubject
+      ? 'All output must stay in the same language as the subject line. Do not translate.'
+      : prDescription
+        ? 'Write all output in the same language as the description. Do not translate.'
+        : '';
+    const languageSuffix = languageInstruction ? `\n\n${languageInstruction}` : '';
+
+    // Get mailing body content for context
+    const { body: mailingBody } = await getFullMailingContent();
+    const contentContext = mailingBody
+      ? `\n\nHere is the mailing content for reference:\n"""${mailingBody.substring(0, 1500)}"""`
+      : '';
+
+    if (currentSubject) {
+      // Improving an existing subject
+      userPrompt = `Generate improved alternatives for this subject line:\n\n"${currentSubject}"\n\nProvide 3-5 alternatives that are more compelling.${contentContext}${languageSuffix}`;
+    } else if (prDescription) {
+      // Generating from description
+      userPrompt = `Generate 3-5 compelling subject lines for a press release about:\n\n${prDescription}\n\nMake them professional, newsworthy, and engaging.${contentContext}${languageSuffix}`;
+    } else {
+      // Generic generation (fallback)
+      userPrompt = `Generate 3-5 compelling subject lines for a press release email. Make them professional, newsworthy, and engaging.${contentContext}${languageSuffix}`;
+    }
+
+    // Call proxy API via API client
+    const result = await window.SmartPRAPI.generateSubjectLines(userPrompt, {
+      currentSubject: currentSubject || undefined
+    });
+
+    showSuggestions(result.subjects, currentSubject);
+    showToast(t('toast.suggestionsGenerated'));
+
+  } catch (error) {
+    console.error('[Smart.pr Helper] Error generating suggestions:', error);
+
+    // Get user-friendly error message
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showError(errorMessage);
+
+    // Add hint to set email via popup if email not configured
+    if (error.code === 'INVALID_EMAIL' || error.code === 'USER_NOT_AUTHORIZED') {
+      const content = $('#sph-content');
+      const hint = document.createElement('p');
+      hint.style.cssText = 'font-size: 12px; color: #9B8FB8; margin-top: 8px; line-height: 1.5;';
+      hint.textContent = t('subject.setEmailHint');
+      content.appendChild(hint);
+    } else {
+      // Add retry button for other errors
+      const currentValue = subjectField ? subjectField.value.trim() : '';
+      setTimeout(() => {
+        const existing = $('#sph-content').innerHTML;
+        $('#sph-content').innerHTML = existing + `
+          <div class="sph-section">
+            <button class="sph-button sph-button-secondary" id="retry-btn">
+              ${t('error.tryAgain')}
+            </button>
+          </div>
+        `;
+        const retryBtn = $('#retry-btn');
+        if (retryBtn) {
+          retryBtn.addEventListener('click', () => generateSubjectSuggestions(currentValue, prDescription));
+        }
+      }, 100);
+    }
+  }
+}
+
+// ========== Feedback ==========
+const SUBJECT_FEEDBACK_PROMPT = `You are a PR and email marketing expert. Analyze the given subject line and provide constructive feedback.
+
+Focus on:
+- Clarity and impact
+- Length (ideal is 40-60 characters)
+- Presence of news hook or value proposition
+- Language effectiveness
+- Potential improvements
+
+Keep your feedback concise (2-4 short bullet points) and actionable. Detect the language of the subject line and respond in that same language.
+
+Format as plain text with bullet points.`;
+
+async function getFeedback(subject) {
+  if (extensionDisabled) return;
+  try {
+    showLoadingState(t('subject.analyzingSubject'));
+
+    // Get mailing body content for context
+    const { body: mailingBody } = await getFullMailingContent();
+    const context = { keepLanguage: true };
+    if (mailingBody) context.mailingContent = mailingBody.substring(0, 1500);
+
+    // Call proxy API via API client
+    const result = await window.SmartPRAPI.getSubjectFeedback(subject, context);
+
+    // Support both structured JSON and legacy string formats
+    const feedback = typeof result.feedback === 'object' ? result.feedback : null;
+    let cascadeIdx = 0;
+
+    const renderCards = (items, colorClass = '') => items.map(point => {
+      const formatted = escapeHTML(point).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+      return `
+        <div class="sph-synonym-option ${colorClass} sph-cascade-item" style="animation-delay: ${cascadeIdx++ * 60}ms">
+          <span class="sph-synonym-text">${formatted}</span>
+        </div>`;
+    }).join('');
+
+    const renderAlternatives = (items) => items.map(rawAlt => {
+      const alt = rawAlt.replace(/^['"]+|['"]+$/g, '');
+      return `
+        <div class="sph-suggestion-item sph-cascade-item" style="animation-delay: ${cascadeIdx++ * 60}ms">
+          <div class="sph-suggestion-text">${escapeHTML(alt)}</div>
+          <div class="sph-suggestion-actions">
+            <button class="sph-use-button" data-text="${escapeHTML(alt)}">${t('subject.use')}</button>
+            <button class="sph-copy-button" data-text="${escapeHTML(alt)}">${t('subject.copy')}</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    // Display feedback
+    const content = $('#sph-content');
+
+    if (feedback && (feedback.positives || feedback.improvements || feedback.alternatives)) {
+      // Structured JSON response
+      let html = `
+        <div class="sph-section">
+          <span class="sph-label">${t('subject.yourSubject')}</span>
+          <div class="sph-current-subject">${escapeHTML(subject)}</div>
+        </div>`;
+
+      if (feedback.positives?.length) {
+        html += `
+        <div class="sph-section">
+          <span class="sph-label">${t('subject.whatWorks')}</span>
+          <div class="sph-synonym-list">${renderCards(feedback.positives, 'sph-feedback-positive')}</div>
+        </div>`;
+      }
+
+      if (feedback.improvements?.length) {
+        html += `
+        <div class="sph-section">
+          <span class="sph-label">${t('subject.improvements')}</span>
+          <div class="sph-synonym-list">${renderCards(feedback.improvements, 'sph-feedback-improvement')}</div>
+        </div>`;
+      } else if (feedback.positives?.length) {
+        html += `
+        <div class="sph-section">
+          <div class="sph-synonym-option sph-feedback-positive sph-cascade-item" style="animation-delay: ${cascadeIdx++ * 60}ms">
+            <span class="sph-synonym-text">${t('subject.noImprovements')}</span>
+          </div>
+        </div>`;
+      }
+
+      if (feedback.alternatives?.length) {
+        html += `
+        <div class="sph-section">
+          <span class="sph-label">${t('subject.alternatives')}</span>
+          <div class="sph-suggestions">${renderAlternatives(feedback.alternatives)}</div>
+        </div>`;
+      }
+
+      content.innerHTML = html;
+
+      // Add "Use" button handlers for alternatives
+      $$('.sph-use-button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const text = btn.dataset.text;
+          if (subjectField) {
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(subjectField, text);
+            subjectField.dispatchEvent(new Event('input', { bubbles: true }));
+            subjectField.dispatchEvent(new Event('change', { bubbles: true }));
+            lastSubjectValue = text;
+            triggerSparkle(btn);
+            btn.textContent = t('result.done');
+            btn.classList.add('copied');
+            setTimeout(() => { btn.textContent = t('subject.use'); btn.classList.remove('copied'); }, 2000);
+          }
+        });
+      });
+
+      // Add copy button handlers for alternatives
+      $$('.sph-copy-button').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          await copyToClipboard(btn.dataset.text);
+          triggerSparkle(btn);
+          btn.textContent = t('result.copied');
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = t('subject.copy'); btn.classList.remove('copied'); }, 2000);
+        });
+      });
+
+    } else {
+      // Legacy fallback: plain text response
+      const feedbackText = typeof result.feedback === 'string' ? result.feedback : JSON.stringify(result.feedback);
+      const feedbackPoints = [];
+      for (const line of feedbackText.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (/^\d+\.\s+/.test(trimmed)) {
+          feedbackPoints.push(trimmed.replace(/^\d+\.\s+/, ''));
+        } else if (feedbackPoints.length > 0) {
+          feedbackPoints[feedbackPoints.length - 1] += ' ' + trimmed;
+        } else {
+          feedbackPoints.push(trimmed);
+        }
+      }
+
+      content.innerHTML = `
+        <div class="sph-section">
+          <span class="sph-label">${t('subject.yourSubject')}</span>
+          <div class="sph-current-subject">${escapeHTML(subject)}</div>
+        </div>
+        <div class="sph-section">
+          <span class="sph-label">${t('sidebar.feedback')}</span>
+          <div class="sph-synonym-list">${renderCards(feedbackPoints)}</div>
+        </div>
+        <div class="sph-section">
+          <button class="sph-button" id="generate-alternatives-btn">
+            ${t('subject.generateBetter')}
+          </button>
+        </div>
+      `;
+
+      $('#generate-alternatives-btn').addEventListener('click', () => {
+        generateSubjectSuggestions(subject);
+      });
+    }
+
+    showToast(t('subject.feedbackReady'));
+
+  } catch (error) {
+    console.error('[Smart.pr Helper] Error getting feedback:', error);
+
+    // Get user-friendly error message
+    const errorMessage = window.SmartPRAPI.getErrorMessage(error);
+    showError(errorMessage);
+
+    // Add hint to set email via popup if email not configured
+    if (error.code === 'INVALID_EMAIL' || error.code === 'USER_NOT_AUTHORIZED') {
+      const content = $('#sph-content');
+      const hint = document.createElement('p');
+      hint.style.cssText = 'font-size: 12px; color: #9B8FB8; margin-top: 8px; line-height: 1.5;';
+      hint.textContent = t('subject.setEmailHint');
+      content.appendChild(hint);
+    }
+  }
+}
+
+// ========== Magic UX Utilities ==========
+
+// #12 View Transitions
+function setContentWithTransition(html) {
+  return new Promise((resolve) => {
+    const content = $('#sph-content');
+    content.style.opacity = '0';
+    content.style.transition = 'opacity 0.1s ease';
+    setTimeout(() => {
+      content.innerHTML = html;
+      content.style.opacity = '';
+      content.style.transition = '';
+      content.classList.remove('sph-view-enter');
+      void content.offsetWidth; // force reflow
+      content.classList.add('sph-view-enter');
+      resolve();
+    }, 100);
+  });
+}
+
+// #4 Sparkle Burst
+function triggerSparkle(buttonElement) {
+  if (!buttonElement) return;
+  const rect = buttonElement.getBoundingClientRect();
+  const topDoc = getTopDocument();
+  const colors = ['#FFD580', '#FFBC7F', '#FFB0C0', '#E8B5E8', '#D4A5F5', '#34D399'];
+
+  for (let i = 0; i < 7; i++) {
+    const spark = topDoc.createElement('div');
+    spark.className = 'sph-sparkle';
+    const angle = (i / 7) * Math.PI * 2;
+    const distance = 20 + Math.random() * 25;
+    spark.style.setProperty('--sx', `${Math.cos(angle) * distance}px`);
+    spark.style.setProperty('--sy', `${Math.sin(angle) * distance}px`);
+    spark.style.left = `${rect.left + rect.width / 2 - 3}px`;
+    spark.style.top = `${rect.top + rect.height / 2 - 3}px`;
+    spark.style.position = 'fixed';
+    spark.style.background = colors[i % colors.length];
+    topDoc.body.appendChild(spark);
+    setTimeout(() => spark.remove(), 550);
+  }
+}
+
+// #11 Typewriter Effect
+function typewriterEffect(element, text, speed = 18) {
+  return new Promise((resolve) => {
+    const words = text.split(/(\s+)/); // preserve whitespace
+    let i = 0;
+    element.textContent = '';
+    const cursor = document.createElement('span');
+    cursor.className = 'sph-typing-cursor';
+    cursor.textContent = '|';
+    element.appendChild(cursor);
+
+    const interval = setInterval(() => {
+      if (i < words.length) {
+        cursor.before(document.createTextNode(words[i]));
+        i++;
+      } else {
+        clearInterval(interval);
+        cursor.remove();
+        resolve();
+      }
+    }, speed);
+  });
+}
+
+// #6 Word-Level Diff
+function diffWords(original, corrected) {
+  const origWords = original.split(/(\s+)/);
+  const corrWords = corrected.split(/(\s+)/);
+  const result = [];
+  let oi = 0;
+  for (let ci = 0; ci < corrWords.length; ci++) {
+    const word = corrWords[ci];
+    if (!word.trim()) {
+      result.push({ text: word, changed: false });
+      continue;
+    }
+    // Check if this word matches the original at roughly the same position
+    if (oi < origWords.length && origWords[oi] === word) {
+      result.push({ text: word, changed: false });
+      oi++;
+    } else {
+      // Skip whitespace in original
+      while (oi < origWords.length && !origWords[oi].trim()) oi++;
+      if (oi < origWords.length && origWords[oi] === word) {
+        result.push({ text: word, changed: false });
+        oi++;
+      } else {
+        result.push({ text: word, changed: true });
+        // Try to advance original past the changed word
+        if (oi < origWords.length) oi++;
+      }
+    }
+  }
+  return result;
+}
+
+function renderDiffHTML(diffResult) {
+  return diffResult.map(seg =>
+    seg.changed
+      ? `<span class="sph-diff-highlight">${escapeHTML(seg.text)}</span>`
+      : escapeHTML(seg.text)
+  ).join('');
+}
+
+// #5 Smart Contextual Greetings
+function getNudgeMessage(type) {
+  const hour = new Date().getHours();
+  let greeting;
+  if (hour >= 5 && hour < 12) {
+    greeting = t('nudge.morning');
+  } else if (hour >= 12 && hour < 17) {
+    greeting = t('nudge.afternoon');
+  } else {
+    greeting = t('nudge.evening');
+  }
+
+  if (type === 'empty') {
+    return `${greeting} ${t('nudge.emptySubject')}`;
+  }
+  return `${greeting} ${t('nudge.filledSubject')}`;
+}
+
+// ========== Helper Functions ==========
+function escapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function renderFeedbackMarkup(text) {
+  if (!text) return '';
+  const escaped = escapeHTML(text);
+  const lines = escaped.split(/\r?\n/);
+  const parts = [];
+  let inList = false;
+
+  const closeList = () => {
+    if (!inList) return;
+    parts.push('</ol>');
+    inList = false;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+    if (orderedMatch) {
+      if (!inList) {
+        parts.push('<ol>');
+        inList = true;
+      }
+      parts.push(`<li>${orderedMatch[1]}</li>`);
+      continue;
+    }
+    closeList();
+    parts.push(`<p>${trimmed}</p>`);
+  }
+
+  closeList();
+
+  return parts.join('')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
+async function copyToClipboard(text) {
+  if (extensionDisabled) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(t('toast.copiedToClipboard'));
+  } catch (error) {
+    // Fallback
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+    showToast(t('toast.copiedToClipboard'));
+  }
+}
+
+function showToast(message) {
+  if (extensionDisabled) return;
+  const topDoc = getTopDocument();
+  const toast = topDoc.createElement('div');
+  toast.className = 'sph-toast';
+  toast.textContent = message;
+  topDoc.body.appendChild(toast);
+
+  setTimeout(() => {
+    toast.remove();
+  }, 2000);
+}
+
+// ========== Message Handler for Popup ==========
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only handle messages in the top frame (not blob iframes or BeePlugin)
+  if (!isTopFrame) return false;
+
+  if (message.type === 'getContext') {
+    sendResponse(detectCurrentContext());
+    return true;
+  }
+
+  if (message.type === 'setSubjectValue') {
+    const field = subjectField || findSubjectField();
+    if (field) {
+      field.focus();
+      field.value = message.value;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.dispatchEvent(new Event('change', { bubbles: true }));
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+
+  if (message.type === 'captureEditorSelection') {
+    // Capture the current selection so it can be replaced later
+    if (!editorIframe) { sendResponse({ success: false }); return true; }
+    try {
+      const iframeDoc = editorIframe.contentDocument || editorIframe.contentWindow?.document;
+      const iframeWin = editorIframe.contentWindow;
+      const selection = iframeWin?.getSelection();
+      if (selection && !selection.isCollapsed && selection.toString().trim()) {
+        const anchorElement = (selection.anchorNode?.nodeType === 1
+          ? selection.anchorNode
+          : selection.anchorNode?.parentElement);
+        const editor = anchorElement?.closest('.tiptap.ProseMirror') || anchorElement?.closest('.mce-content-body');
+        if (editor) {
+          selectedText = selection.toString().trim();
+          selectedEditor = editor;
+          selectedEditorDoc = iframeDoc;
+          currentSelection = selection.getRangeAt(0).cloneRange();
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false });
+        }
+      } else {
+        sendResponse({ success: false });
+      }
+    } catch (e) {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+
+  if (message.type === 'replaceEditorText') {
+    if (selectedEditor) {
+      replaceTextInEditor(message.value);
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+
+  if (message.type === 'getMailingContent') {
+    getFullMailingContent().then(({ subject, body }) => {
+      sendResponse({ subject, body });
+    });
+    return true;
+  }
+});
+
+function getEditorSelectionText(iframe) {
+  try {
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    const iframeWin = iframe.contentWindow;
+    if (!iframeDoc || !iframeWin) return '';
+    const selection = iframeWin.getSelection();
+    if (selection && !selection.isCollapsed) {
+      const text = selection.toString().trim();
+      if (text) return text;
+    }
+  } catch (e) {
+    // Cross-origin or other access error
+  }
+  return '';
+}
+
+function detectCurrentContext() {
+  if (extensionDisabled) return { mode: 'disabled', onSmartPr: true };
+
+  // Only use tracked state set by the dialog watcher (not broad DOM searches
+  // which can match unrelated inputs on the page)
+
+  // Check for editor first (highest priority — when the editor is open,
+  // the paragraph coach is the main tool the user needs)
+
+  // Check for classic editor (only if already tracked and still in DOM)
+  if (editorIframe && editorIframe.isConnected) {
+    const selText = getEditorSelectionText(editorIframe);
+    return { mode: 'editor', selectedText: selText || '', onSmartPr: true };
+  }
+
+  // Check for pro editor (BeePlugin iframe)
+  const beeIframes = document.querySelectorAll('iframe[src*="getbee.io"]');
+  if (beeIframes.length > 0) {
+    return { mode: 'editor', selectedText: '', onSmartPr: true };
+  }
+
+  // Check for subject field (only if already detected and still in DOM)
+  if (subjectField && subjectField.isConnected && !subjectField.disabled && !subjectField.readOnly) {
+    return { mode: 'subject', value: subjectField.value.trim(), onSmartPr: true };
+  }
+
+  return { mode: 'none', onSmartPr: true };
+}
+
+// ========== Initialization ==========
+function detachSubjectListeners() {
+  if (subjectField && subjectListenersAttached) {
+    subjectField.removeEventListener('focus', handleSubjectFocus);
+    subjectField.removeEventListener('blur', hideNudgeOnBlur);
+    subjectField.removeEventListener('input', handleSubjectInput);
+    subjectListenersAttached = false;
+  }
+}
+
+function teardownExtensionUI() {
+  hideNudge();
+  teardownParagraphCoach();
+  closeSidebar();
+  if (sidebar) {
+    sidebar.remove();
+    sidebar = null;
+  }
+  if (floatingIcon) {
+    floatingIcon.remove();
+    floatingIcon = null;
+  }
+  detachSubjectListeners();
+  if (subjectWatchTimer) {
+    clearTimeout(subjectWatchTimer);
+    subjectWatchTimer = null;
+  }
+}
+
+function applyExtensionState(disabled) {
+  extensionDisabled = Boolean(disabled);
+  if (extensionDisabled) {
+    if (isBeePluginFrame) {
+      teardownProEditor();
+    } else {
+      teardownExtensionUI();
+    }
+    return;
+  }
+
+  if (isBeePluginFrame) {
+    // Pro editor: Run paragraph coach inside the BeePlugin iframe
+    initProEditor();
+  } else if (isTopFrame) {
+    // Top frame on smart.pr: Run floating icon, subject line helper, dialog watcher
+    if (!floatingIcon) {
+      createFloatingIcon();
+    }
+
+    // Single dialog watcher handles both subject field and editor detection
+    initDialogWatcher();
+  }
+}
+
+// ========== Cross-Frame Messaging (Pro Editor ↔ Top Frame) ==========
+
+if (isTopFrame) {
+  window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data.type !== 'string' || !e.data.type.startsWith('sph:')) return;
+
+    switch (e.data.type) {
+      case 'sph:open-sidebar':
+        proEditorSource = e.source;
+        proEditorBlockType = e.data.blockType || 'text';
+        proEditorContext = e.data.context || '';
+        selectedText = e.data.text;
+        selectedEditor = null;
+        selectedEditorDoc = null;
+        currentSelection = null;
+        openParagraphCoachSidebar();
+        break;
+
+      case 'sph:selection-update':
+        if (currentSidebarMode !== 'paragraph') return;
+        selectedText = e.data.text;
+        proEditorBlockType = e.data.blockType || proEditorBlockType;
+        updateSelectedTextDisplay();
+        break;
+
+      case 'sph:replace-done':
+        break;
+
+      case 'sph:undo-done':
+        showToast(e.data.success ? t('toast.undone') : (e.data.message || t('toast.undoFailed')));
+        break;
+    }
+  });
+}
+
+if (isBeePluginFrame) {
+  // Listen for commands from top frame
+  window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data.type !== 'string' || !e.data.type.startsWith('sph:')) return;
+
+    switch (e.data.type) {
+      case 'sph:replace-text': {
+        if (!selectedEditor) return;
+        try {
+          const newText = e.data.text;
+          const isInputElement = selectedEditor.tagName === 'INPUT';
+
+          // Save undo state locally
+          undoState = {
+            editor: selectedEditor,
+            editorDoc: selectedEditorDoc || selectedEditor.ownerDocument || document,
+            originalText: isInputElement ? selectedEditor.value : selectedText,
+            newText: newText,
+            isInput: isInputElement
+          };
+
+          if (isInputElement) {
+            selectedEditor.focus();
+            selectedEditor.value = newText;
+            selectedEditor.dispatchEvent(new Event('input', { bubbles: true }));
+            selectedEditor.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            const editorDoc = selectedEditorDoc || selectedEditor.ownerDocument || document;
+            const editorWin = editorDoc.defaultView || window;
+            selectedEditor.focus();
+
+            if (currentSelection) {
+              const selection = editorWin.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(currentSelection);
+              editorDoc.execCommand('insertText', false, newText);
+            } else {
+              const selection = editorWin.getSelection();
+              const range = editorDoc.createRange();
+              range.selectNodeContents(selectedEditor);
+              selection.removeAllRanges();
+              selection.addRange(range);
+              editorDoc.execCommand('insertText', false, newText);
+            }
+          }
+
+          currentSelection = null;
+          selectedText = '';
+          try { CSS.highlights?.delete('sph-selection'); } catch (e) {}
+          window.top.postMessage({ type: 'sph:replace-done' }, '*');
+        } catch (err) {
+          console.error('[Smart.pr Helper] Pro editor replace error:', err);
+        }
+        break;
+      }
+
+      case 'sph:undo-replace': {
+        if (!undoState) {
+          window.top.postMessage({ type: 'sph:undo-done', success: false, message: 'Nothing to undo.' }, '*');
+          return;
+        }
+        try {
+          const { editor, editorDoc, originalText, newText, isInput } = undoState;
+          if (isInput) {
+            editor.focus();
+            editor.value = originalText;
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+            editor.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            const editorWin = editorDoc.defaultView || window;
+            editor.focus();
+            const range = findTextRange(editor, newText, editorDoc);
+            if (range) {
+              const sel = editorWin.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+              editorDoc.execCommand('insertText', false, originalText);
+            }
+          }
+          undoState = null;
+          window.top.postMessage({ type: 'sph:undo-done', success: true }, '*');
+        } catch (err) {
+          console.error('[Smart.pr Helper] Pro editor undo error:', err);
+          window.top.postMessage({ type: 'sph:undo-done', success: false, message: t('toast.undoFailed') }, '*');
+        }
+        break;
+      }
+
+      case 'sph:sidebar-closed':
+        sidebarOpenInTop = false;
+        try { CSS.highlights?.delete('sph-selection'); } catch (e) {}
+        break;
+
+      case 'sph:get-mailing-content': {
+        const blocks = findAllEditableBlocks(document);
+        const fullBody = blocks.map(b =>
+          b.element.value !== undefined ? b.element.value : b.element.innerText
+        ).filter(t => t && t.trim()).join('\n').trim();
+        window.top.postMessage({
+          type: 'sph:mailing-content-response',
+          body: fullBody
+        }, '*');
+        break;
+      }
+    }
+  });
+
+  // Track selection changes and forward to top frame when sidebar is open there
+  document.addEventListener('selectionchange', () => {
+    if (!sidebarOpenInTop) return;
+    if (selectionUpdateTimer) clearTimeout(selectionUpdateTimer);
+    selectionUpdateTimer = setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !selection.toString().trim()) return;
+
+      const anchorNode = selection.anchorNode;
+      const anchorElement = anchorNode && anchorNode.nodeType === 1
+        ? anchorNode : anchorNode?.parentElement;
+      const editor = anchorElement?.closest('.mce-content-body');
+      if (!editor) return;
+
+      const text = selection.toString().trim();
+      selectedEditor = editor;
+      selectedEditorDoc = editor.ownerDocument || document;
+      currentSelection = selection.getRangeAt(0).cloneRange();
+      selectedText = text;
+
+      // Update visual highlight to match new selection
+      if (CSS.highlights) {
+        try { CSS.highlights.set('sph-selection', new Highlight(currentSelection)); } catch (e) {}
+      }
+
+      const container = editor.closest('.module-box');
+      const blockType = container ? getBlockType(container) : 'text';
+
+      window.top.postMessage({
+        type: 'sph:selection-update',
+        text: text,
+        blockType: blockType
+      }, '*');
+    }, 200);
+  });
+}
+
+function init() {
+  console.log('[Smart.pr Helper] Initializing...');
+
+  // Initialize language before starting UI
+  window.SmartPRI18n.initLanguage().then(() => {
+    chrome.storage.sync.get([EXTENSION_DISABLED_KEY], (result) => {
+      applyExtensionState(Boolean(result[EXTENSION_DISABLED_KEY]));
+    });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync') return;
+      if (EXTENSION_DISABLED_KEY in changes) {
+        applyExtensionState(Boolean(changes[EXTENSION_DISABLED_KEY].newValue));
+      }
+    });
+  });
+}
+
+// Start when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
